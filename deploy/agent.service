@@ -1,0 +1,15 @@
+# Keeps the monitor agent running on a Linux machine, as your user (no root needed):
+#   mkdir -p ~/.config/systemd/user && cp deploy/agent.service ~/.config/systemd/user/monitor-agent.service
+#   (edit the path below)
+#   systemctl --user enable --now monitor-agent
+#   loginctl enable-linger $USER     # keep it running when you're logged out (servers)
+[Unit]
+Description=Monitor agent
+
+[Service]
+ExecStart=/usr/bin/python3 %h/bin/monitor_client.py agent
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

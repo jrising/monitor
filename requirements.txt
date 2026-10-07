@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn>=0.29
+apscheduler>=3.10,<4
+pyyaml>=6
+requests>=2.31
+a2wsgi>=1.10

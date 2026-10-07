@@ -1,0 +1,73 @@
+# The feed list. Edit it in the dashboard (Edit feeds); it is stored on the server as data/monitor.yaml.
+#
+# Each panel:
+#   id:          unique slug (also what the Python client pushes to)
+#   name, group: display name and group (groups become filter chips: servers, laptop, web, finance, ...)
+#   priority:    true -> a block in the top grid; false -> the scrolling list
+#   url:         optional link on the panel name
+#   check:       optional; what the schedule and a click on the light run:
+#                  http     {url, contains?, expect_status?, slow_ms?, timeout?}
+#                  tcp      {host, port}                                  -- databases, ssh, anything with a port
+#                  quote    {symbol, shares?, below?, above?}             -- stock/ETF price (Yahoo, unofficial)
+#                  process  {name, min_count?, idle_below?}               -- running? for how long, CPU, RAM
+#                  path     {path, pattern?, recursive?, max_age?, min_files?, min_size?}
+#                                                                         -- file: size/age; dir: file count, size, newest
+#   on:          for process/path: the token name of the machine that runs it (that machine runs
+#                `monitor_client.py agent`). Without `on`, they look at the monitor's own host.
+#   schedule:    "every 15m" / "every 2h", or cron "0 * * * *"
+#   stale_after: "26h" -> red if nothing has reported for that long (for pushed jobs)
+#
+# Panels that only receive pushes don't need to be listed — the first push creates them.
+
+panels:
+  # --- websites / databases (checked by the monitor itself) ------------------
+  - id: site-lab
+    name: Lab website
+    group: web
+    priority: true
+    url: https://example.org
+    check: {type: http, url: "https://example.org", slow_ms: 1500}
+    schedule: every 15m
+
+  - id: db-mysql
+    name: MySQL
+    group: web
+    check: {type: tcp, host: mysql.example.org, port: 3306}
+    schedule: every 15m
+
+  # --- on a compute server (it runs the agent with a token named "compute1") --
+  - id: compute1-train
+    name: compute1 · train.py
+    group: servers
+    priority: true
+    on: compute1
+    check: {type: process, name: "train.py", idle_below: 5}
+    schedule: every 15m
+
+  - id: compute1-outputs
+    name: compute1 · outputs
+    group: servers
+    on: compute1
+    check: {type: path, path: "/scratch/james/runs", pattern: "*.nc", max_age: 6h}
+    schedule: every 1h
+
+  # --- on the laptop (token "laptop") ----------------------------------------
+  - id: laptop-zotero
+    name: Zotero library
+    group: laptop
+    on: laptop
+    check: {type: path, path: "~/Zotero/zotero.sqlite"}
+    schedule: every 1h
+
+  # --- pushed jobs: listed only to set stale_after / priority -----------------
+  - id: laptop-backup
+    name: Nightly backup
+    group: laptop
+    stale_after: 26h
+
+  # --- finance ----------------------------------------------------------------
+  - id: tick-vti
+    name: VTI
+    group: finance
+    check: {type: quote, symbol: VTI, below: 250}
+    schedule: "*/30 9-16 * * 1-5"

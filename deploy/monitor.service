@@ -1,0 +1,16 @@
+# systemd unit for a VPS / your own server (not needed on DreamHost shared hosting).
+# Copy to /etc/systemd/system/monitor.service, adjust User and paths, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now monitor
+[Unit]
+Description=Monitor dashboard
+After=network-online.target
+
+[Service]
+User=james
+WorkingDirectory=/opt/monitor
+Environment=MONITOR_SCHEDULER=internal
+ExecStart=/opt/monitor/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8600
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

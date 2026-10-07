@@ -1,0 +1,101 @@
+"""The HTTP API: login, the feed editor, tokens and their limits, and the agent round trip."""
+import pytest
+from fastapi.testclient import TestClient
+
+import server
+
+FEEDS = """panels:
+  - id: laptop-train
+    name: train.py
+    group: laptop
+    on: laptop
+    check: {type: process, name: pytest}
+    schedule: every 15m
+  - id: finance-total
+    name: Portfolio
+    group: finance
+  - id: graph
+    name: CPU graph
+    priority: true
+    embed: https://example.org/graph
+    height: 180
+"""
+
+
+@pytest.fixture(scope="module")
+def admin():
+    c = TestClient(server.app)
+    c.__enter__()
+    assert c.post("/api/login", json={"password": "wrong"}).status_code == 401
+    assert c.post("/api/login", json={"password": "test-password"}).status_code == 200
+    c.headers["X-Monitor"] = "1"
+    yield c
+    c.__exit__(None, None, None)
+
+
+@pytest.fixture(scope="module")
+def laptop_token(admin):
+    r = admin.post("/api/tokens", json={"name": "laptop"})
+    assert r.status_code == 200 and r.json()["scope"] == "laptop-*"
+    return r.json()["token"]
+
+
+def bearer(tok):
+    c = TestClient(server.app)
+    c.headers["Authorization"] = f"Bearer {tok}"
+    return c
+
+
+def test_requires_login():
+    assert TestClient(server.app).get("/api/panels").status_code == 401
+
+
+def test_cookie_writes_need_header(admin):
+    r = admin.put("/api/config", json={"text": "panels:"}, headers={"X-Monitor": ""})
+    assert r.status_code == 403
+
+
+def test_feed_editor_validation(admin):
+    bad = admin.put("/api/config", json={"text": "panels:\n  - {id: x, check: {type: shell, command: id}}"})
+    assert bad.status_code == 422 and "check.type" in bad.json()["detail"]
+    bad = admin.put("/api/config", json={"text": "panels:\n  - {id: x, on: laptop, check: {type: http, url: 'https://a'}}"})
+    assert bad.status_code == 422
+    r = admin.put("/api/config", json={"text": FEEDS})
+    assert r.status_code == 200, r.text
+    cfg = admin.get("/api/config").json()
+    assert {c["name"] for c in cfg["checks"]} >= {"http", "json", "csv"}
+    graph = admin.get("/api/panels/graph").json()
+    assert graph["display"] == {"embed": "https://example.org/graph", "height": 180}
+
+
+def test_token_scope(admin, laptop_token):
+    t = bearer(laptop_token)
+    assert t.put("/api/panels/laptop-job", json={"status": "ok", "stats": {"n": 3}}).status_code == 200
+    assert t.put("/api/panels/other-job", json={"status": "ok"}).status_code == 403
+    assert t.get("/api/panels/finance-total").status_code == 404
+    assert t.get("/api/config").status_code == 403
+    assert t.put("/api/panels/laptop-job", json={"check": {"type": "http"}}).json().get("check") is None
+    ids = {p["id"] for p in t.get("/api/panels").json()["panels"]}
+    assert ids == {"laptop-job", "laptop-train"}
+
+
+def test_agent_round_trip(admin, laptop_token):
+    t = bearer(laptop_token)
+    assert admin.get("/api/panels/laptop-train").json()["status"] == "grey"  # agent never seen
+    work = t.get("/api/agent").json()
+    assert work["name"] == "laptop" and [c["id"] for c in work["checks"] if c["run"]] == ["laptop-train"]
+    import monitor_client
+    res = monitor_client.run_local_check(work["checks"][0]["check"])
+    assert t.post("/api/agent/results", json={"results": [{"id": "laptop-train", **res}]}).json()["recorded"] == ["laptop-train"]
+    assert not any(c["run"] for c in t.get("/api/agent").json()["checks"])  # not due again yet
+    assert admin.get("/api/panels/laptop-train").json()["status"] == "green"
+    # a click on the light asks the agent to re-run it
+    assert admin.post("/api/panels/laptop-train/poll").json()["mode"] == "requested"
+    assert [c["id"] for c in t.get("/api/agent").json()["checks"] if c["run"]] == ["laptop-train"]
+
+
+def test_revoke(admin):
+    tok = admin.post("/api/tokens", json={"name": "temp"}).json()["token"]
+    assert bearer(tok).get("/api/agent").status_code == 200
+    admin.delete("/api/tokens/temp")
+    assert bearer(tok).get("/api/agent").status_code == 401

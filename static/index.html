@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f3f2ee; --surface: #ffffff; --surface-2: #f8f7f4; --line: #e2e0d9; --ink: #1d1d1b; --ink-2: #5f5e58; --ink-3: #8d8b83;
+  --green: #1f9d55; --green-glow: rgba(31,157,85,.35);
+  --yellow: #d49a00; --yellow-glow: rgba(212,154,0,.38);
+  --red: #d4402b; --red-glow: rgba(212,64,43,.38);
+  --grey: #a9a79f; --grey-glow: rgba(0,0,0,0);
+  --bar: #1d1d1b; --err-bg: #fbecea;
+  --mono: "IBM Plex Mono", ui-monospace, monospace; --sans: "IBM Plex Sans", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121311; --surface: #1b1c1a; --surface-2: #20211f; --line: #2c2d2a; --ink: #ecebe6; --ink-2: #a6a59e; --ink-3: #74736d;
+    --green: #3ccf7a; --green-glow: rgba(60,207,122,.45); --yellow: #f2c230; --yellow-glow: rgba(242,194,48,.45);
+    --red: #ff5f4a; --red-glow: rgba(255,95,74,.5); --grey: #55554f; --bar: #ecebe6; --err-bg: #2c1a17;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121311; --surface: #1b1c1a; --surface-2: #20211f; --line: #2c2d2a; --ink: #ecebe6; --ink-2: #a6a59e; --ink-3: #74736d;
+  --green: #3ccf7a; --green-glow: rgba(60,207,122,.45); --yellow: #f2c230; --yellow-glow: rgba(242,194,48,.45);
+  --red: #ff5f4a; --red-glow: rgba(255,95,74,.5); --grey: #55554f; --bar: #ecebe6; --err-bg: #2c1a17;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 var(--sans); }
+body { padding: 20px clamp(16px, 3vw, 36px) 40px; }
+button { font: inherit; color: inherit; }
+
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-bottom: 18px; }
+h1 { font: 600 18px/1 var(--sans); margin: 0; letter-spacing: -.01em; display: flex; align-items: center; gap: 10px; }
+.counts { display: flex; gap: 14px; font: 500 13px var(--mono); color: var(--ink-2); }
+.counts span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--grey); }
+.dot.green { background: var(--green); } .dot.yellow { background: var(--yellow); } .dot.red { background: var(--red); }
+.spacer { flex: 1; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--surface); padding: 4px 10px; border-radius: 999px; cursor: pointer; font-size: 12.5px; color: var(--ink-2); }
+.chip.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip .bad { color: var(--red); font-weight: 600; margin-left: 4px; }
+.chip.on .bad { color: var(--red); }
+input[type=search] { border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 5px 10px; border-radius: 6px; font: inherit; width: 160px; }
+.iconbtn { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 5px 9px; cursor: pointer; color: var(--ink-2); }
+.meta { font: 12px var(--mono); color: var(--ink-3); }
+
+h2 { font: 600 11.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 22px 0 10px; }
+
+/* priority grid */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 12px 10px; display: flex; flex-direction: column; gap: 7px; min-height: 118px; position: relative; }
+.tile.red { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+.tile-top { display: flex; align-items: flex-start; gap: 10px; }
+.name { font-weight: 600; font-size: 14px; line-height: 1.25; overflow-wrap: anywhere; }
+.name a { color: inherit; text-decoration: none; } .name a:hover { text-decoration: underline; }
+.group { font: 11px var(--mono); color: var(--ink-3); }
+
+.light { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 0; padding: 0; cursor: pointer; background: var(--grey);
+  box-shadow: 0 0 0 3px var(--surface-2), 0 0 10px 1px var(--grey-glow); transition: transform .12s; }
+.light:hover { transform: scale(1.12); }
+.light:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.light.green { background: var(--green); box-shadow: 0 0 0 3px var(--surface-2), 0 0 12px 2px var(--green-glow); }
+.light.yellow { background: var(--yellow); box-shadow: 0 0 0 3px var(--surface-2), 0 0 12px 2px var(--yellow-glow); animation: pulse 1.4s ease-in-out infinite; }
+.light.red { background: var(--red); box-shadow: 0 0 0 3px var(--surface-2), 0 0 12px 2px var(--red-glow); }
+.light.waiting { animation: pulse .8s ease-in-out infinite; }
+.list .light { width: 14px; height: 14px; box-shadow: none; }
+@keyframes pulse { 50% { opacity: .45; } }
+
+.stage { color: var(--ink-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.err { background: var(--err-bg); color: var(--red); font: 12px/1.35 var(--mono); padding: 5px 7px; border-radius: 5px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--bar); border-radius: 2px; transition: width .4s; }
+.stats { display: flex; flex-wrap: wrap; gap: 4px 12px; font: 12px var(--mono); }
+.stats b { font-weight: 500; color: var(--ink); } .stats span { color: var(--ink-3); }
+.foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tile.embed { grid-column: span 2; }
+@media (max-width: 520px) { .tile.embed { grid-column: auto; } }
+.tile iframe { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); display: block; }
+.hist { display: flex; gap: 2px; }
+.hist i { width: 4px; height: 10px; border-radius: 1px; background: var(--grey); opacity: .8; }
+.hist i.green { background: var(--green); } .hist i.yellow { background: var(--yellow); } .hist i.red { background: var(--red); }
+
+/* non-priority list */
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; max-height: 52vh; overflow-y: auto; }
+.row { display: grid; grid-template-columns: 22px minmax(140px, 1.1fr) minmax(0, 2fr) minmax(0, 1.4fr) 70px; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.row .name { font-size: 13.5px; font-weight: 500; }
+.row .msg { font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .msg.e { color: var(--red); font-family: var(--mono); font-size: 12px; }
+.row .stats { flex-wrap: nowrap; overflow: hidden; }
+.row .meta { text-align: right; }
+@media (max-width: 720px) {
+  .row { grid-template-columns: 22px minmax(0, 1fr) auto; row-gap: 3px; }
+  .row .light { grid-row: 1; } .row .meta { grid-row: 1; grid-column: 3; }
+  .row .msg-cell, .row .stats { grid-column: 2 / 4; }
+  .row .stats:empty { display: none; }
+}
+.empty { color: var(--ink-3); padding: 18px 14px; font-size: 13px; }
+.banner { background: var(--err-bg); color: var(--red); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; display: none; }
+
+/* feed editor */
+#editor { position: fixed; inset: 0; background: var(--bg); z-index: 10; display: none; flex-direction: column; padding: 16px clamp(16px, 3vw, 36px); gap: 12px; }
+#editor.open { display: flex; }
+.ed-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ed-head h1 { font-size: 16px; }
+.ed-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+#cfg { width: 100%; height: 100%; resize: none; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink);
+  font: 13px/1.55 var(--mono); padding: 12px 14px; tab-size: 2; white-space: pre; overflow: auto; }
+#cfg:focus { outline: 2px solid color-mix(in srgb, var(--ink) 25%, transparent); }
+.side { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; font-size: 12.5px; color: var(--ink-2); }
+.side h3 { font: 600 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 6px; }
+.snips { display: flex; flex-wrap: wrap; gap: 6px; }
+.side code { font: 11.5px var(--mono); color: var(--ink); }
+.side dl { margin: 0; } .side dt { font: 500 12px var(--mono); color: var(--ink); margin-top: 6px; } .side dd { margin: 1px 0 0 0; }
+.pushed { display: flex; flex-direction: column; gap: 4px; }
+.pushed div { display: flex; justify-content: space-between; align-items: center; gap: 8px; font: 12px var(--mono); }
+.pushed button { border: 0; background: none; color: var(--ink-3); cursor: pointer; padding: 2px 6px; }
+.pushed button:hover { color: var(--red); }
+#edmsg { font: 12.5px var(--mono); min-height: 1.4em; }
+#edmsg.bad { color: var(--red); } #edmsg.good { color: var(--green); }
+.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+@media (max-width: 760px) { .ed-body { grid-template-columns: 1fr; grid-template-rows: minmax(300px, 1fr) auto; } .side { max-height: 30vh; } }
+.tok-form { display: flex; flex-direction: column; gap: 6px; }
+.tok-form input { border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 5px 8px; border-radius: 6px; font: 12px var(--mono); width: 100%; }
+.tok-new { background: var(--surface); border: 1px solid var(--green); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.tok-new code { word-break: break-all; user-select: all; }
+.toklist .sub { color: var(--ink-3); font-size: 11px; }
+.login-err { color: var(--red); font-size: 12.5px; min-height: 1.2em; margin: -6px 0 8px; }
+
+dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 18px; width: min(380px, 92vw); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog input { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--ink); font: 13px var(--mono); margin: 8px 0 12px; }
+dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="overall"></span>Monitor</h1>
+  <div class="counts" id="counts"></div>
+  <div class="spacer"></div>
+  <div class="filters" id="filters"></div>
+  <input type="search" id="q" placeholder="Filter…" aria-label="Filter panels">
+  <button class="iconbtn" id="editbtn" hidden>Edit feeds</button>
+  <button class="iconbtn" id="logout" hidden title="Log out">Log out</button>
+</header>
+<div class="banner" id="banner"></div>
+
+<h2>Priority</h2>
+<div class="grid" id="grid"></div>
+<div class="empty" id="grid-empty" hidden></div>
+<h2>Everything else</h2>
+<div class="list" id="list"></div>
+<p class="meta" id="updated" style="margin-top:14px"></p>
+
+<dialog id="dlg">
+  <form id="loginform">
+    <div style="font-weight:600">Log in</div>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required>
+    <div class="login-err" id="loginerr"></div>
+    <div class="btns"><button class="iconbtn primary" type="submit">Log in</button></div>
+  </form>
+</dialog>
+
+<section id="editor" aria-label="Feed editor">
+  <div class="ed-head">
+    <h1>Feeds</h1><span class="meta" id="edpath"></span>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="edcheck">Check</button>
+    <button class="iconbtn primary" id="edsave" title="Ctrl/⌘-S">Save</button>
+    <button class="iconbtn" id="edclose">Close</button>
+  </div>
+  <div id="edmsg"></div>
+  <div class="ed-body">
+    <textarea id="cfg" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Feed definitions (YAML)"></textarea>
+    <div class="side">
+      <div><h3>Add</h3><div class="snips" id="snips"></div></div>
+      <div><h3>Fields</h3><dl>
+        <dt>id</dt><dd>unique; scripts push to this name</dd>
+        <dt>priority: true</dt><dd>block in the grid, not the list</dd>
+        <dt>schedule</dt><dd><code>every 15m</code>, <code>every 2h</code>, or cron <code>"0 * * * *"</code></dd>
+        <dt>stale_after</dt><dd><code>26h</code>: red if nothing reported that long</dd>
+        <dt>on: laptop</dt><dd>run a process/path check on the machine using token <code>laptop</code> (it runs <code>monitor_client.py agent</code>)</dd>
+        <dt>embed: https://…</dt><dd>show that page inside the panel (<code>height: 240</code>); the site must allow framing</dd>
+        <dt>${SECRET_NAME}</dt><dd>in a check, replaced by that value from the server's monitor.env</dd>
+      </dl></div>
+      <div><h3>Check types</h3><dl id="ctypes"></dl></div>
+      <div id="schednote" class="meta"></div>
+      <div><h3>Tokens</h3>
+        <div class="pushed toklist" id="tokens"></div>
+        <form class="tok-form" id="tokform" style="margin-top:8px">
+          <input id="tokname" placeholder="name, e.g. laptop" aria-label="Token name" required pattern="[A-Za-z0-9._-]+">
+          <input id="tokscope" placeholder="panels it may update (default: name-*)" aria-label="Token scope">
+          <button class="iconbtn" type="submit">New token</button>
+        </form>
+        <div id="toknew"></div>
+      </div>
+      <div><h3>Created by pushes</h3><div class="pushed" id="pushed"></div></div>
+    </div>
+  </div>
+</section>
+
+<script>
+const DEMO = new URLSearchParams(location.search).has("demo");
+const REFRESH_MS = 5000;
+let role = null;
+let panels = [], serverNow = Date.now() / 1000, clockSkew = 0, group = "all", query = "";
+const waiting = new Set();
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function ago(ts) {
+  if (!ts) return "never";
+  const s = Date.now() / 1000 + clockSkew - ts;
+  if (s < 60) return `${Math.max(0, Math.floor(s))}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+async function api(method, path, body) {
+  if (DEMO) return demoApi(method, path);
+  const headers = { "X-Monitor": "1" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, { method, headers, credentials: "same-origin", body: body !== undefined ? JSON.stringify(body) : undefined });
+  if (r.status === 401 && path !== "/api/login") { setRole(null); showLogin(); throw new Error("401"); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(data.detail || r.status); e.status = r.status; throw e; }
+  return data;
+}
+function setRole(r) {
+  role = r;
+  $("editbtn").hidden = $("logout").hidden = role !== "admin" || DEMO;
+}
+function showLogin() { if (!$("dlg").open) { $("loginerr").textContent = ""; $("dlg").showModal(); $("pw").focus(); } }
+$("loginform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("POST", "/api/login", { password: $("pw").value });
+    $("pw").value = ""; $("dlg").close(); setRole("admin"); refresh();
+  } catch (err) { $("loginerr").textContent = err.message === "401" ? "Wrong password." : err.message; }
+});
+$("dlg").addEventListener("cancel", (e) => e.preventDefault()); // can't dismiss the login
+$("logout").onclick = async () => { await api("POST", "/api/logout").catch(() => {}); setRole(null); panels = []; render(); showLogin(); };
+function showBanner(msg) { $("banner").textContent = msg; $("banner").style.display = msg ? "block" : "none"; }
+
+async function refresh() {
+  try {
+    const d = await api("GET", "/api/panels");
+    panels = d.panels; clockSkew = d.now - Date.now() / 1000;
+    for (const p of panels) if (!p.poll_requested && p.status !== "yellow") waiting.delete(p.id);
+    showBanner("");
+    $("updated").textContent = `refreshed ${new Date().toLocaleTimeString()} · click a light to check it now`;
+  } catch (e) {
+    if (e.message !== "401") showBanner("Can't reach the monitor server — showing last known state.");
+    else showBanner("");
+  }
+  render();
+}
+
+async function poll(id) {
+  waiting.add(id); render();
+  try { await api("POST", `/api/panels/${encodeURIComponent(id)}/poll`); } catch {}
+  setTimeout(refresh, 700); setTimeout(refresh, 2500);
+}
+
+function statsHtml(stats) {
+  return Object.entries(stats || {}).map(([k, v]) => `<span>${esc(k.replace(/_/g, " "))} <b>${esc(v)}</b></span>`).join("");
+}
+function lightHtml(p) {
+  const w = waiting.has(p.id) || p.poll_requested ? " waiting" : "";
+  const label = `${p.name}: ${p.status}. Click to check now`;
+  return `<button class="light ${p.status}${w}" data-poll="${esc(p.id)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+}
+function nameHtml(p) { return /^https?:\/\//i.test(p.url || "") ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.name)}</a>` : esc(p.name); }
+
+// Priority tiles are updated in place (keyed by panel id) rather than rebuilt, because moving or
+// recreating an iframe reloads it: embedded pages would otherwise reload on every refresh.
+const tileEls = new Map();
+function tileParts(p) {
+  const pct = p.progress != null ? Math.round(p.progress * 100) : null;
+  const stats = { ...(p.stats || {}) };
+  if (pct != null) stats["done"] = pct + "%";
+  const disp = p.display || {};
+  const embed = /^https:\/\//i.test(disp.embed || "") ? disp.embed : null;
+  const light = embed && !p.check && p.status === "grey" ? "" : lightHtml(p);
+  const head = `<div class="tile-top">${light}<div style="min-width:0"><div class="name">${nameHtml(p)}</div><div class="group">${esc(p.group)}</div></div></div>
+    ${p.stage ? `<div class="stage" title="${esc(p.stage)}">${esc(p.stage)}</div>` : ""}
+    ${pct != null && pct < 100 ? `<div class="progress"><div style="width:${pct}%"></div></div>` : ""}
+    ${p.error ? `<div class="err" title="${esc(p.error)}">${esc(p.error)}</div>` : ""}`;
+  const foot = `${Object.keys(stats).length ? `<div class="stats">${statsHtml(stats)}</div>` : ""}
+    <div class="foot"><div class="hist">${(p.history || []).slice(-16).map((h) => `<i class="${h.status}" title="${esc(new Date(h.ts * 1000).toLocaleString() + (h.message ? " · " + h.message : ""))}"></i>`).join("")}</div>
+    <span class="meta" title="${p.updated_at ? new Date(p.updated_at * 1000).toLocaleString() : ""}">${ago(p.updated_at)}</span></div>`;
+  return { head, foot, embed, height: Number(disp.height) || 200 };
+}
+function renderGrid(list) {
+  const grid = $("grid"), ids = new Set(list.map((p) => p.id));
+  for (const [id, el] of tileEls) if (!ids.has(id)) { el.remove(); tileEls.delete(id); }
+  let prev = null;
+  for (const p of list) {
+    const parts = tileParts(p);
+    let el = tileEls.get(p.id);
+    if (!el) {
+      el = document.createElement("div");
+      el.innerHTML = `<div class="tile-head"></div><div class="embed-slot"></div><div class="tile-foot"></div>`;
+      el.style.display = "flex"; el.style.flexDirection = "column";
+      tileEls.set(p.id, el);
+    }
+    el.className = `tile ${p.status}${parts.embed ? " embed" : ""}`;
+    const [head, slot, foot] = el.children;
+    head.innerHTML = parts.head; foot.innerHTML = parts.foot;
+    head.style.cssText = foot.style.cssText = "display:flex;flex-direction:column;gap:7px";
+    foot.style.marginTop = "auto";
+    let frame = slot.querySelector("iframe");
+    if (!parts.embed) { slot.replaceChildren(); slot.style.display = "none"; }
+    else {
+      slot.style.display = "block";
+      if (!frame || frame.dataset.src !== parts.embed) {
+        frame = document.createElement("iframe");
+        frame.src = frame.dataset.src = parts.embed;
+        frame.loading = "lazy"; frame.referrerPolicy = "no-referrer"; frame.title = p.name;
+        frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups");
+        slot.replaceChildren(frame);
+      }
+      frame.style.height = parts.height + "px";
+    }
+    const want = prev ? prev.nextSibling : grid.firstChild;
+    if (want !== el) grid.insertBefore(el, want); // only moves tiles whose position changed
+    prev = el;
+  }
+  $("grid-empty").hidden = list.length > 0;
+  $("grid-empty").textContent = `No priority panels${group !== "all" ? " in this group" : ""}.`;
+}
+function row(p) {
+  const pct = p.progress != null && p.progress < 1 ? ` · ${Math.round(p.progress * 100)}%` : "";
+  const msg = p.error ? `<div class="msg e" title="${esc(p.error)}">${esc(p.error)}</div>` : `<div class="msg" title="${esc(p.stage || "")}">${esc(p.stage || "")}${pct}</div>`;
+  return `<div class="row">${lightHtml(p)}
+    <div style="min-width:0"><div class="name">${nameHtml(p)}</div><div class="group">${esc(p.group)}</div></div>
+    <div class="msg-cell" style="min-width:0">${msg}</div>
+    <div class="stats">${statsHtml(p.stats)}</div>
+    <div class="meta">${ago(p.updated_at)}</div></div>`;
+}
+
+function render() {
+  const groups = [...new Set(panels.map((p) => p.group))].sort();
+  const bad = (g) => panels.filter((p) => (g === "all" || p.group === g) && p.status === "red").length;
+  $("filters").innerHTML = ["all", ...groups].map((g) => {
+    const b = bad(g);
+    return `<button class="chip ${g === group ? "on" : ""}" data-group="${esc(g)}">${esc(g)}${b ? `<span class="bad">${b}</span>` : ""}</button>`;
+  }).join("");
+
+  const n = { green: 0, yellow: 0, red: 0 };
+  panels.forEach((p) => n[p.status] != null && n[p.status]++);
+  $("counts").innerHTML = ["green", "yellow", "red"].map((s) => `<span><i class="dot ${s}"></i>${n[s]}</span>`).join("");
+  $("overall").className = "dot " + (n.red ? "red" : n.yellow ? "yellow" : panels.length ? "green" : "");
+  document.title = (n.red ? `(${n.red}) ` : "") + "Monitor";
+
+  const q = query.toLowerCase();
+  const vis = panels.filter((p) => (group === "all" || p.group === group) &&
+    (!q || [p.name, p.id, p.group, p.stage, p.error].some((x) => (x || "").toLowerCase().includes(q))));
+  const pri = vis.filter((p) => p.priority);
+  // non-priority: problems float to the top
+  const order = { red: 0, yellow: 1, grey: 2, green: 3 };
+  const rest = vis.filter((p) => !p.priority).sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name));
+  renderGrid(pri);
+  $("list").innerHTML = rest.map(row).join("") || `<div class="empty">Nothing here.</div>`;
+}
+
+document.addEventListener("click", (e) => {
+  const l = e.target.closest("[data-poll]"); if (l) return poll(l.dataset.poll);
+  const c = e.target.closest("[data-group]"); if (c) { group = c.dataset.group; render(); }
+});
+$("q").addEventListener("input", (e) => { query = e.target.value; render(); });
+
+/* ---------- feed editor ---------- */
+const STATIC_SNIPPETS = {
+  "pushed job": `  - id: nightly-backup\n    name: Nightly backup\n    group: servers\n    stale_after: 26h\n`,
+  "embed": `  - id: grafana-cpu\n    name: CPU graph\n    group: servers\n    priority: true\n    embed: https://example.org/dashboard/panel\n    height: 220\n`,
+};
+let SNIPPETS = {};
+let savedText = "";
+const ed = $("cfg");
+function edMsg(text, cls = "") { $("edmsg").textContent = text; $("edmsg").className = cls; }
+async function openEditor() {
+  try {
+    const c = await api("GET", "/api/config");
+    ed.value = savedText = c.text; $("edpath").textContent = c.path;
+    $("schednote").textContent = c.scheduler === "external"
+      ? "Schedules run from the server's cron job, so intervals shorter than it are rounded up."
+      : "";
+    SNIPPETS = { ...STATIC_SNIPPETS };
+    for (const ct of c.checks) if (ct.example) SNIPPETS[ct.name] = ct.example.replace(/\s*$/, "\n").replace(/^(?=.)/gm, "  ");
+    $("ctypes").innerHTML = c.checks.map((ct) => `<dt>${esc(ct.name)}${ct.where === "machine" ? " (on a machine)" : ct.where === "both" ? " (here or on a machine)" : ""}</dt>
+      <dd>${esc(ct.doc.replace(/\s+/g, " ").split(/(?<=\.)\s+(?=[A-Z])/)[0])}${ct.required.length ? ` Needs: <code>${ct.required.map(esc).join(", ")}</code>.` : ""}</dd>`).join("");
+    const perr = Object.entries(c.plugin_errors || {});
+    if (perr.length) edMsg("Check plugins that failed to load: " + perr.map(([k, v]) => `${k} (${v})`).join("; "), "bad");
+    $("snips").innerHTML = Object.keys(SNIPPETS).map((k) => `<button class="chip" data-snip="${esc(k)}">+ ${esc(k)}</button>`).join("");
+    renderPushed(); loadTokens(); $("toknew").innerHTML = ""; if (!perr.length) edMsg("");
+    $("editor").classList.add("open"); ed.focus();
+  } catch (e) { if (e.message !== "401") showBanner("Couldn't open the editor: " + e.message); }
+}
+function renderPushed() {
+  const pushed = panels.filter((p) => !p.from_config);
+  $("pushed").innerHTML = pushed.map((p) => `<div><span>${esc(p.id)}</span><button data-del="${esc(p.id)}" title="Delete ${esc(p.id)}" aria-label="Delete ${esc(p.id)}">✕</button></div>`).join("")
+    || `<span class="meta">none</span>`;
+}
+async function saveConfig(dry) {
+  edMsg(dry ? "Checking…" : "Saving…");
+  try {
+    const r = await api("PUT", "/api/config", { text: ed.value, dry_run: dry });
+    if (!dry) savedText = ed.value;
+    edMsg((dry ? `Looks good: ${r.panels} panels.` : `Saved ${r.panels} panels.` + (r.checking?.length ? ` Checking ${r.checking.join(", ")} now.` : "")) + (r.note ? " " + r.note : ""), "good");
+    if (!dry) setTimeout(refresh, 400);
+  } catch (e) { if (e.message !== "401") edMsg(e.message, "bad"); }
+}
+function closeEditor() {
+  if (ed.value !== savedText && !confirm("Discard unsaved changes?")) return;
+  $("editor").classList.remove("open"); refresh();
+}
+async function loadTokens() {
+  try {
+    const { tokens } = await api("GET", "/api/tokens");
+    $("tokens").innerHTML = tokens.map((t) => {
+      const used = t.agent_seen ? `agent seen ${ago(t.agent_seen)}` : t.last_used ? `used ${ago(t.last_used)}` : "never used";
+      return `<div><span>${esc(t.name)} <span class="sub">${esc(t.scope || "agent checks only")} · ${used}</span></span>
+        <button data-revoke="${esc(t.name)}" title="Revoke ${esc(t.name)}" aria-label="Revoke ${esc(t.name)}">✕</button></div>`;
+    }).join("") || `<span class="meta">none yet</span>`;
+  } catch {}
+}
+$("tokform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const t = await api("POST", "/api/tokens", { name: $("tokname").value.trim(), scope: $("tokscope").value.trim() || $("tokname").value.trim() + "-*" });
+    const cmd = `python3 monitor_client.py login ${location.origin} ${t.token}`;
+    $("toknew").innerHTML = `<div class="tok-new"><b>Token for ${esc(t.name)}</b><span class="meta">Copy it now; it won't be shown again. On that machine run:</span>
+      <code>${esc(cmd)}</code><button class="iconbtn" id="tokcopy" type="button">Copy command</button></div>`;
+    $("tokcopy").onclick = () => navigator.clipboard?.writeText(cmd).then(() => ($("tokcopy").textContent = "Copied"));
+    $("tokname").value = $("tokscope").value = ""; loadTokens();
+  } catch (err) { if (err.message !== "401") edMsg(err.message, "bad"); }
+});
+$("editbtn").onclick = openEditor;
+$("edclose").onclick = closeEditor;
+$("edcheck").onclick = () => saveConfig(true);
+$("edsave").onclick = () => saveConfig(false);
+ed.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveConfig(false); }
+  else if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); ed.setRangeText("  ", ed.selectionStart, ed.selectionEnd, "end"); }
+  else if (e.key === "Escape") closeEditor();
+});
+$("editor").addEventListener("click", async (e) => {
+  const s = e.target.closest("[data-snip]");
+  if (s) {
+    const t = ed.value.replace(/\s*$/, "\n");
+    ed.value = t + (/^panels:/m.test(t) ? "" : "panels:\n") + "\n" + SNIPPETS[s.dataset.snip];
+    ed.focus(); ed.setSelectionRange(ed.value.length, ed.value.length); ed.scrollTop = ed.scrollHeight;
+    edMsg("Edit the new entry at the bottom, then Save.");
+  }
+  const rv = e.target.closest("[data-revoke]");
+  if (rv && confirm(`Revoke token '${rv.dataset.revoke}'? Scripts and the agent using it stop working at once.`)) {
+    try { await api("DELETE", `/api/tokens/${encodeURIComponent(rv.dataset.revoke)}`); loadTokens(); } catch (err) { edMsg(err.message, "bad"); }
+  }
+  const d = e.target.closest("[data-del]");
+  if (d && confirm(`Delete panel '${d.dataset.del}' and its history? (It comes back if a script pushes to it again.)`)) {
+    try { await api("DELETE", `/api/panels/${encodeURIComponent(d.dataset.del)}`); panels = panels.filter((p) => p.id !== d.dataset.del); renderPushed(); }
+    catch (err) { edMsg(err.message, "bad"); }
+  }
+});
+window.addEventListener("beforeunload", (e) => { if ($("editor").classList.contains("open") && ed.value !== savedText) e.preventDefault(); });
+
+/* ---------- demo data (open /?demo to preview without a server) ---------- */
+let demo;
+function demoApi(method, path) {
+  const now = Date.now() / 1000;
+  if (!demo) {
+    const h = (...s) => s.map((st, i) => ({ ts: now - (s.length - i) * 3600, status: st, message: "" }));
+    const G = "green", Y = "yellow", R = "red";
+    demo = [
+      { id: "ssp-ensemble", name: "SSP ensemble run", group: "servers", priority: true, status: G, stage: "scenario 132 / 240 — solving equilibrium", progress: .55, stats: { n_results: 132, eta: "3h10m" }, updated_at: now - 40, history: h(G, G, G, G, G, G) },
+      { id: "iam-calibration", name: "IAM calibration", group: "servers", priority: true, status: R, error: "MemoryError: unable to allocate 18.2 GiB for array (shape (240, 1e7))", stats: { n_results: 61 }, progress: .25, updated_at: now - 1500, history: h(G, G, G, Y, R) },
+      { id: "db-postgres", name: "Postgres (lab DB)", group: "web", priority: true, status: G, stats: { latency: "3 ms" }, updated_at: now - 300, history: h(G, G, G, G, G, G, G, G) },
+      { id: "site-lab", name: "lab website", group: "web", priority: true, status: Y, stage: "checking…", stats: { http: 200, latency: "812 ms" }, updated_at: now - 4, history: h(G, G, G, G, Y) },
+      { id: "laptop-sync", name: "Zotero → NAS sync", group: "laptop", priority: true, status: G, stage: "ok at 2026-10-06 20:00", stats: { took: "42s" }, updated_at: now - 2800, history: h(G, G, R, G, G) },
+      { id: "portfolio", name: "Portfolio", group: "finance", priority: true, status: G, stats: { value: "$—", day: "+0.41%" }, updated_at: now - 900, history: h(G, G, G) },
+      { id: "era5-download", name: "ERA5 download", group: "servers", status: G, stage: "fetching 1987-03", progress: .31, stats: { files: 452 }, updated_at: now - 20 },
+      { id: "backup-nightly", name: "Nightly backup", group: "servers", status: R, error: "no update for 1d", updated_at: now - 1.2 * 86400 },
+      { id: "jupyterhub", name: "JupyterHub", group: "web", status: G, stats: { http: 200, latency: "95 ms" }, updated_at: now - 600 },
+      { id: "paper-build", name: "paper.tex build", group: "laptop", status: G, stage: "ok", stats: { pages: 38 }, updated_at: now - 7200 },
+      { id: "tick-vti", name: "VTI", group: "finance", status: G, stats: { price: "—", day: "+0.38%" }, updated_at: now - 900 },
+      { id: "disk-compute1", name: "compute1 disk", group: "servers", status: Y, stage: "/scratch 91% full", stats: { free: "180 GB" }, updated_at: now - 3000 },
+    ].map((p) => ({ history: [], ...p }));
+  }
+  if (method === "POST") {
+    const id = decodeURIComponent(path.split("/")[3]); const p = demo.find((x) => x.id === id);
+    const prev = p.status; p.status = "yellow"; p.stage = "checking…";
+    setTimeout(() => { p.status = prev === "yellow" ? "green" : prev; p.stage = prev === "red" ? null : "checked just now"; p.updated_at = Date.now() / 1000; waiting.delete(id); render(); }, 1500);
+    return Promise.resolve({ mode: "check" });
+  }
+  return Promise.resolve({ now, panels: demo });
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+setInterval(render, 15000); // keep "x ago" fresh between fetches
+if (!DEMO) api("GET", "/api/me").then((m) => {
+  setRole(m.role);
+  if (!m.role && !m.password_set) showBanner("No MONITOR_PASSWORD is set on the server, so the dashboard can't be opened. See the README.");
+  else if (!m.role) showLogin();
+}).catch(() => {});
+</script>
+</body>
+</html>

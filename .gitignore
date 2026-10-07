@@ -1,0 +1,13 @@
+# Server state and secrets: never commit these
+monitor.env
+data/*
+!data/.gitkeep
+
+# Python / hosting
+__pycache__/
+*.pyc
+venv/
+.venv/
+tmp/
+public/
+.pytest_cache/
