@@ -2,14 +2,33 @@
 # Install (or repair) the monitor on DreamHost shared hosting, running as a CGI script.
 #
 #   git clone https://github.com/YOU/monitor.git ~/monitor-app      # the app: NOT inside a web folder
-#   bash ~/monitor-app/deploy/dreamhost/setup.sh monitor.yourdomain.org
+#   bash ~/monitor-app/deploy/dreamhost/setup.sh monitor.yourdomain.org [web folder]
+#
+# The web folder is the site's "Web directory" in the DreamHost panel. If you don't give it, the script
+# uses ~/monitor.yourdomain.org, or else finds a folder with that name elsewhere in your home
+# (e.g. ~/projects/monitor.yourdomain.org).
 #
 # Safe to re-run any time; it checks everything and fixes what it can.
 set -uo pipefail
 APP="$(cd "$(dirname "$0")/../.." && pwd)"
 DOMAIN="${1:-}"
-[ -n "$DOMAIN" ] || { echo "usage: bash deploy/dreamhost/setup.sh monitor.yourdomain.org"; exit 2; }
-WEB="${WEB_DIR:-$HOME/$DOMAIN}"
+[ -n "$DOMAIN" ] || { echo "usage: bash deploy/dreamhost/setup.sh monitor.yourdomain.org [web folder]"; exit 2; }
+WEB="${2:-${WEB_DIR:-}}"
+if [ -z "$WEB" ]; then
+  if [ -d "$HOME/$DOMAIN" ]; then
+    WEB="$HOME/$DOMAIN"
+  else  # look for a folder named after the site elsewhere in the home directory
+    found=$(find "$HOME" -maxdepth 4 -type d -name "$DOMAIN" -not -path "*/.*" 2>/dev/null)
+    case "$(printf '%s' "$found" | grep -c .)" in
+      1) WEB="$found" ;;
+      0) WEB="$HOME/$DOMAIN" ;;  # reported as missing below
+      *) echo "Several folders are named $DOMAIN:"; echo "$found" | sed 's/^/  /'
+         echo "Run again with the one the DreamHost panel uses as the web directory, e.g.:"
+         echo "  bash $0 $DOMAIN $(echo "$found" | head -1)"; exit 2 ;;
+    esac
+  fi
+fi
+WEB="$(cd "$WEB" 2>/dev/null && pwd || echo "$WEB")"
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
 bad()  { printf '  \033[31mFIX\033[0m   %s\n' "$*"; PROBLEMS=$((PROBLEMS+1)); }
 note() { printf '  \033[33mnote\033[0m  %s\n' "$*"; }
@@ -18,9 +37,13 @@ PROBLEMS=0
 echo "Monitor setup: app in $APP, site $DOMAIN served from $WEB"
 
 # --- 1. folders: the app must not be web-readable --------------------------------------------
-[ -d "$WEB" ] || die "$WEB doesn't exist. Add $DOMAIN under Websites in the DreamHost panel first (or set WEB_DIR=...)."
-case "$APP/" in "$WEB/"*) die "the app is inside the web folder, where anyone could download monitor.env and the database.
-          Move it out:  mv $APP ~/monitor-app  (then run this script from there)";; esac
+[ -d "$WEB" ] || die "$WEB doesn't exist. Add $DOMAIN under Websites in the DreamHost panel first, or give its
+          web directory:  bash $0 $DOMAIN /home/you/path/to/$DOMAIN"
+case "$APP/" in "$WEB/"*)
+  [ "$APP" = "$WEB" ] && fix="mv $APP ~/monitor-app && mkdir $WEB" || fix="mv $APP ~/monitor-app"
+  die "the app is inside the web folder, where anyone could download monitor.env and the database.
+          Move it out:  $fix
+          then run:     bash ~/monitor-app/deploy/dreamhost/setup.sh $DOMAIN $WEB";; esac
 if [ -e "$WEB/server.py" ] || [ -e "$WEB/monitor.env" ] || [ -d "$WEB/data" ]; then
   die "$WEB still contains app files (server.py / monitor.env / data). They are publicly downloadable.
           Move anything you need out of $WEB, delete the rest, then re-run this script."

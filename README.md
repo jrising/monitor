@@ -69,6 +69,9 @@ refreshes every 30 s and agents check in every 60 s in this setup.
    git clone https://github.com/YOURNAME/monitor.git ~/monitor-app
    bash ~/monitor-app/deploy/dreamhost/setup.sh monitor.yourdomain.org
    ```
+   If the panel's web directory for the site isn't `~/monitor.yourdomain.org`, the script finds a
+   folder with the site's name elsewhere in your home (e.g. `~/projects/monitor.yourdomain.org`), or
+   you can give it as a second argument.
    The script creates the venv (needs Python 3.10+; it finds one or tells you how to get one), creates
    `monitor.env` with a random password it prints once, writes the two web files, removes DreamHost's
    "almost here" page, and tests the app locally and live. It's safe to re-run at any time, and it's
