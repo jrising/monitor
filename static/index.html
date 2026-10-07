@@ -503,11 +503,14 @@ function demoApi(method, path) {
   return Promise.resolve({ now, panels: demo });
 }
 
+let refreshTimer = null;
+function startRefresh(ms) { clearInterval(refreshTimer); refreshTimer = setInterval(refresh, ms); }
 refresh();
-setInterval(refresh, REFRESH_MS);
+startRefresh(REFRESH_MS);
 setInterval(render, 15000); // keep "x ago" fresh between fetches
 if (!DEMO) api("GET", "/api/me").then((m) => {
   setRole(m.role);
+  if (m.refresh && m.refresh * 1000 !== REFRESH_MS) startRefresh(m.refresh * 1000);
   if (!m.role && !m.password_set) showBanner("No MONITOR_PASSWORD is set on the server, so the dashboard can't be opened. See the README.");
   else if (!m.role) showLogin();
 }).catch(() => {});

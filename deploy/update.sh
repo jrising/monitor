@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pull the latest code from GitHub and restart the app. Run on the server:
-#   ~/monitor.yourdomain.org/deploy/update.sh
+#   bash ~/monitor-app/deploy/update.sh
 # Your feed list, database and settings (data/, monitor.env) are untouched.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -11,7 +11,5 @@ venv/bin/python server.py validate || echo "warning: the feed list has an error;
 
 if [ -f /etc/systemd/system/monitor.service ]; then
   sudo systemctl restart monitor          # VPS install
-else
-  mkdir -p tmp && touch tmp/restart.txt   # DreamHost / Passenger
-fi
+fi                                        # DreamHost (CGI): nothing to restart; the next request runs the new code
 echo "Updated to $(git log -1 --format='%h %s')"

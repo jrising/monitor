@@ -20,8 +20,7 @@ server.py             web app, API, scheduler; `python server.py tick` for cron
 checks/               check types, one file per family; add files here to extend
 monitor_client.py     for your machines: push API, agent, CLI (standard library only)
 static/index.html     the dashboard and feed editor
-passenger_wsgi.py     entry point on DreamHost shared hosting
-deploy/               update script, systemd units, macOS launchd file for the agent
+deploy/               DreamHost setup, update script, systemd/launchd files for the agent
 tests/                pytest suite (runs on GitHub on every push)
 data/                 your feed list and database (not in git)
 monitor.env           your password and settings (not in git; see monitor.env.example)
@@ -52,33 +51,42 @@ From then on, edit and push, then run `deploy/update.sh` on the server (below). 
 
 ## Deploying on DreamHost shared hosting
 
-Shared plans don't allow long-running processes, so the app runs under DreamHost's Passenger and a
-DreamHost cron job runs the scheduled checks (`MONITOR_SCHEDULER=external`).
+DreamHost shared plans run Python web apps as CGI scripts (Passenger is no longer supported, and
+long-running processes aren't allowed). So:
 
-1. **Panel → Websites:** add a subdomain (e.g. `monitor.yourdomain.org`), turn on **Passenger** and the
-   free **Let's Encrypt** certificate.
-2. **SSH in once to install** (you won't need SSH for day-to-day use):
+* the app lives in a folder of its own, **outside** the web folder (`~/monitor-app`);
+* the web folder (`~/monitor.yourdomain.org`) holds only `monitor.cgi`, a small launcher, and an
+  `.htaccess` that sends every URL to it;
+* a DreamHost cron job runs the scheduled checks.
+
+Each request starts Python afresh (about a second), which is fine for one person; the dashboard
+refreshes every 30 s and agents check in every 60 s in this setup.
+
+1. **Panel → Websites:** add the subdomain (e.g. `monitor.yourdomain.org`) as an ordinary website, and
+   turn on its free **Let's Encrypt** certificate.
+2. **SSH in once:**
    ```bash
-   cd ~/monitor.yourdomain.org
-   git init && git remote add origin https://github.com/YOURNAME/monitor.git
-   git fetch && git checkout -f -t origin/main        # alongside DreamHost's public/ folder
-   python3 -m venv venv && venv/bin/pip install -r requirements.txt
-   cp monitor.env.example monitor.env && nano monitor.env   # set MONITOR_PASSWORD
-   mkdir -p tmp && touch tmp/restart.txt
+   git clone https://github.com/YOURNAME/monitor.git ~/monitor-app
+   bash ~/monitor-app/deploy/dreamhost/setup.sh monitor.yourdomain.org
    ```
-   A private repo needs a deploy key or a token for `git fetch`; GitHub's "deploy keys" page shows
-   how. Python 3.10+ is needed; if `python3 --version` is older, install a newer one with DreamHost's
-   custom-Python guide and use it to make the venv.
-3. **Panel → Advanced → Cron Jobs:** every 5 minutes (or as often as allowed), with email off:
+   The script creates the venv (needs Python 3.10+; it finds one or tells you how to get one), creates
+   `monitor.env` with a random password it prints once, writes the two web files, removes DreamHost's
+   "almost here" page, and tests the app locally and live. It's safe to re-run at any time, and it's
+   the first thing to try if something isn't working.
+3. **Panel → Advanced → Cron Jobs:** add the command the script prints, every 5 minutes, email off:
    ```bash
-   cd ~/monitor.yourdomain.org && venv/bin/python server.py tick
+   /home/YOU/monitor-app/venv/bin/python3 /home/YOU/monitor-app/server.py tick
    ```
-   Each tick runs only the checks whose schedule has come round; schedules shorter than the cron
-   interval are rounded up.
+   Each tick runs only the checks whose schedule has come round; schedules shorter than 5 minutes are
+   rounded up.
 4. Open `https://monitor.yourdomain.org`, log in, click **Edit feeds**.
 
-**Updating later:** `ssh` in and run `~/monitor.yourdomain.org/deploy/update.sh`. It pulls, installs
-any new requirements, checks the feed list still loads and restarts the app.
+**Updating later:** `bash ~/monitor-app/deploy/update.sh`. It pulls, installs any new requirements
+and checks the feed list still loads. Under CGI there's nothing to restart: the next request runs the
+new code.
+
+**Never put the app itself in the web folder.** Anything there can be downloaded, including
+`monitor.env` (your password) and the database. `setup.sh` refuses to run if it finds app files there.
 
 ## Deploying on a VPS or your own server
 

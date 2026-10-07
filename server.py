@@ -6,6 +6,8 @@ Settings come from environment variables or a `monitor.env` file next to this sc
   MONITOR_PASSWORD   password for the dashboard and editor (required)
   MONITOR_SCHEDULER  "internal" (default: built-in scheduler, needs a long-running process)
                      or "external" (shared hosting: run `python server.py tick` from cron)
+  MONITOR_REFRESH    seconds between dashboard refreshes (default 5; use ~30 under CGI)
+  MONITOR_AGENT_INTERVAL  seconds between agent check-ins (default 15; use ~60 under CGI)
   MONITOR_TZ         time zone for cron-style schedules, e.g. America/New_York (default: server's)
   MONITOR_TOKEN      optional extra push token with access to every panel (tokens are normally
                      created in the dashboard: Edit feeds → Tokens)
@@ -15,7 +17,7 @@ Settings come from environment variables or a `monitor.env` file next to this sc
 Kinds of check live in checks/ — one file per family; drop a new file there to add one.
 
 Run (VPS / own server):   uvicorn server:app --host 127.0.0.1 --port 8600
-Run (DreamHost shared):   see passenger_wsgi.py and README
+Run (DreamHost shared):   CGI, see deploy/dreamhost/ and the README
 Due checks from cron:     python server.py tick
 """
 from __future__ import annotations
@@ -83,6 +85,8 @@ TZ = None
 if os.environ.get("MONITOR_TZ"):
     from zoneinfo import ZoneInfo
     TZ = ZoneInfo(os.environ["MONITOR_TZ"])
+REFRESH_SECONDS = int(os.environ.get("MONITOR_REFRESH", "5"))          # dashboard reload interval
+AGENT_INTERVAL = int(os.environ.get("MONITOR_AGENT_INTERVAL", "15"))  # how often agents check in
 HISTORY_LEN = 24
 SESSION_DAYS = 30
 AGENT_OFFLINE_AFTER = 15 * 60  # an agent unseen this long shows its panels as unknown
@@ -127,6 +131,7 @@ _db.executescript(
         name TEXT PRIMARY KEY, hash TEXT UNIQUE, scope TEXT DEFAULT '*', created REAL, last_used REAL
     );
     CREATE TABLE IF NOT EXISTS agents (name TEXT PRIMARY KEY, last_seen REAL);
+    CREATE TABLE IF NOT EXISTS login_fails (ip TEXT, ts REAL);
     """
 )
 _have = {r[1] for r in _db.execute("PRAGMA table_info(panels)")}
@@ -470,15 +475,19 @@ def load_config_file() -> list[str]:
 
 
 def _run_soon(ids: list[str]) -> None:
-    for pid in ids:
-        threading.Thread(target=run_check, args=(pid,), daemon=True).start()
+    if SCHED_MODE == "internal":
+        for pid in ids:
+            threading.Thread(target=run_check, args=(pid,), daemon=True).start()
+    elif ids:  # CGI: the process ends with the request, so run them now (checks have timeouts)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(run_check, ids))
 
 
 _initialized = False
 
 
 def init() -> None:
-    """Load config and start the scheduler (idempotent; also called from passenger_wsgi.py)."""
+    """Load config and start the scheduler (idempotent; also called by the CGI launcher)."""
     global _initialized
     if _initialized:
         return
@@ -504,7 +513,6 @@ def init() -> None:
 #   to it with `on: <token name>`. It can never define checks or read other panels.
 COOKIE = "monitor_session"
 _session_key = hashlib.sha256(f"monitor-session:{PASSWORD}".encode()).digest()
-_fails: dict[str, list[float]] = {}
 _last_used_written: dict[str, float] = {}
 
 
@@ -651,14 +659,15 @@ def login(body: Login, request: Request, response: Response):
         raise HTTPException(400, "no MONITOR_PASSWORD set on the server")
     ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0]
     now = time.time()
-    recent = [t for t in _fails.get(ip, []) if now - t < 900]
-    if len(recent) >= 8:
+    # kept in the database, not memory: under CGI every request is a new process
+    write("DELETE FROM login_fails WHERE ts < ?", (now - 900,))
+    if q1("SELECT COUNT(*) AS n FROM login_fails WHERE ip=?", (ip,))["n"] >= 8:
         raise HTTPException(429, "too many attempts; try again in 15 minutes")
     if not hmac.compare_digest(body.password.encode(), PASSWORD.encode()):
-        _fails[ip] = recent + [now]
+        write("INSERT INTO login_fails VALUES (?, ?)", (ip, now))
         time.sleep(1)
         raise HTTPException(401, "wrong password")
-    _fails.pop(ip, None)
+    write("DELETE FROM login_fails WHERE ip=?", (ip,))
     https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     response.set_cookie(COOKIE, make_session(), max_age=SESSION_DAYS * 86400, httponly=True,
                         secure=https, samesite="strict", path="/")
@@ -678,7 +687,7 @@ def me(request: Request):
         role = w.role if w.role == "admin" else None
     except HTTPException:
         role = None
-    return {"role": role, "password_set": bool(PASSWORD), "scheduler": SCHED_MODE}
+    return {"role": role, "password_set": bool(PASSWORD), "scheduler": SCHED_MODE, "refresh": REFRESH_SECONDS}
 
 
 @app.get("/api/panels")
@@ -781,7 +790,7 @@ def agent_poll(w: Who = Depends(token_only)):
         except ValueError:
             run = False
         checks.append({"id": r["id"], "check": json.loads(r["check_spec"]), "run": run})
-    return {"name": w.name, "checks": checks}
+    return {"name": w.name, "checks": checks, "poll_every": AGENT_INTERVAL}
 
 
 @app.post("/api/agent/results")
@@ -889,7 +898,8 @@ if __name__ == "__main__":
     a = ap.parse_args()
     try:
         if a.cmd == "validate":
-            print(f"ok: {len(parse_config(CONFIG_PATH.read_text()))} panels")
+            text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else ""
+            print(f"ok: {len(parse_config(text))} panels")
         else:
             load_config_file()  # pick up edits made directly to the file
             ran = tick(force=a.all)

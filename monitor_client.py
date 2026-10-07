@@ -67,6 +67,7 @@ class Monitor:
         req.add_header("Content-Type", "application/json")
         if self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
+            req.add_header("X-Token", self.token)  # some hosts (Apache CGI) strip Authorization
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return json.loads(r.read() or b"null")
@@ -379,9 +380,14 @@ def run_local_check(spec: dict) -> dict:
 
 
 # ======================================================================= agent
+_server_interval: Optional[float] = None
+
+
 def agent_pass(mon: Monitor) -> tuple[str, list[str]]:
     """Ask the server which of this machine's checks are due, run them, report back."""
+    global _server_interval
     info = mon._request("GET", "/api/agent", raise_errors=True)
+    _server_interval = info.get("poll_every")
     due = [c for c in info["checks"] if c["run"]]
     if due:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
@@ -390,7 +396,7 @@ def agent_pass(mon: Monitor) -> tuple[str, list[str]]:
     return info["name"], [c["id"] for c in due]
 
 
-def run_agent(mon: Monitor, once: bool, interval: float) -> int:
+def run_agent(mon: Monitor, once: bool, interval: Optional[float]) -> int:
     if once:
         try:
             name, ran = agent_pass(mon)
@@ -400,7 +406,7 @@ def run_agent(mon: Monitor, once: bool, interval: float) -> int:
         if ran:
             print(f"{time.strftime('%H:%M:%S')} {name}: checked {', '.join(ran)}")
         return 0
-    print(f"monitor agent polling {mon.url} every {interval:.0f}s (Ctrl-C to stop)")
+    print(f"monitor agent polling {mon.url} (Ctrl-C to stop)")
     while True:
         try:
             name, ran = agent_pass(mon)
@@ -410,7 +416,7 @@ def run_agent(mon: Monitor, once: bool, interval: float) -> int:
             print(f"[monitor] {e}", file=sys.stderr, flush=True)
         except Exception as e:  # keep the agent alive whatever happens
             print(f"[monitor] agent error: {e}", file=sys.stderr, flush=True)
-        time.sleep(interval)
+        time.sleep(interval or _server_interval or 15)  # the server suggests an interval
 
 
 # ======================================================================= CLI
@@ -433,7 +439,7 @@ def _cli(argv: Optional[list[str]] = None) -> int:
 
     a = sub.add_parser("agent", help="run this machine's process/path checks from the feed list")
     a.add_argument("--once", action="store_true", help="one pass and exit (for cron)")
-    a.add_argument("--interval", type=float, default=15, help="seconds between polls (default 15)")
+    a.add_argument("--interval", type=float, help="seconds between polls (default: what the server suggests)")
 
     t = sub.add_parser("test", help="try a check locally, e.g. test process train.py / test path ~/data")
     t.add_argument("type", choices=sorted(LOCAL_CHECKS)); t.add_argument("target")
