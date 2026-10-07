@@ -17,7 +17,10 @@ In a Python job:
     run.done()
 
 Wrap a command (e.g. in crontab):
-    python monitor_client.py run backup --group laptop --stale-after 26h -- rsync -a ~/Docs nas:/docs
+    monitor-client run laptop-backup --stale-after 26h -- rsync -a ~/Docs nas:/docs
+Several commands as stages of one panel:
+    monitor-client run laptop-sync --stage fetch --step 1/2 -- python fetch.py &&
+    monitor-client run laptop-sync --stage load  --step 2/2 -- python load.py
 
 Run the feed list's process/path checks assigned to this machine (`on: <token name>`):
     python monitor_client.py agent            # stays running; answers dashboard clicks within ~15 s
@@ -433,6 +436,11 @@ def _cli(argv: Optional[list[str]] = None) -> int:
     r.add_argument("panel")
     r.add_argument("--name"); r.add_argument("--group"); r.add_argument("--priority", action="store_true")
     r.add_argument("--stale-after", help="e.g. 26h: go red if this job hasn't reported in that long")
+    r.add_argument("--stage", metavar="NAME",
+                   help="report this command as one stage of a multi-step job on the same panel")
+    r.add_argument("--step", metavar="K/N",
+                   help="with --stage: this is stage K of N (shows progress; stage 1 starts a fresh run, "
+                        "and later stages don't hide an earlier stage's failure)")
 
     s = sub.add_parser("set", help="push a one-off update")
     s.add_argument("panel"); s.add_argument("status", nargs="?")
@@ -489,8 +497,19 @@ def _cli(argv: Optional[list[str]] = None) -> int:
 
     if not cmd:
         ap.error("no command given (use: run PANEL -- cmd args...)")
+    if args.step and not args.stage:
+        ap.error("--step needs --stage NAME")
+    k = n = None
+    if args.step:
+        try:
+            k, n = (int(x) for x in args.step.split("/"))
+            assert 1 <= k <= n
+        except (ValueError, AssertionError):
+            ap.error("--step must look like 2/3")
     p = mon.panel(args.panel, name=args.name, group=args.group, priority=args.priority or None,
                   stale_after=args.stale_after)
+    if args.stage:
+        return _run_stage(p, cmd, args.stage, k, n)
     p.update("green", stage=f"running: {' '.join(cmd)[:120]}", clear=["error", "progress"])
     t0 = time.time()
     proc = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
@@ -502,6 +521,43 @@ def _cli(argv: Optional[list[str]] = None) -> int:
         last = (proc.stderr.strip().splitlines() or [f"exit {proc.returncode}"])[-1]
         p.update("red", stage=f"failed at {time.strftime('%Y-%m-%d %H:%M')}", error=last[:400],
                  took=took, exit=proc.returncode)
+    return proc.returncode
+
+
+def _run_stage(p: Panel, cmd: list[str], name: str, k: Optional[int], n: Optional[int]) -> int:
+    """One stage of a multi-step job. Each stage's run time is kept as a stat named after it."""
+    label = f"{name} ({k}/{n})" if k else name
+    key = name if name not in ("status", "stage", "error", "progress", "clear") else f"{name} step"
+    first = k is None or k == 1
+    last = k is None or k == n
+    earlier_failed = False
+    if not first:  # don't let a later stage paint over an earlier stage's failure in this run
+        info = p.m._request("GET", f"/api/panels/{p.id}") or {}
+        earlier_failed = info.get("status") == "red" and not info.get("stale")
+    if first:
+        p.update("green", stage=f"{label}: running", progress=0.0 if k else None,
+                 clear=["error", "stats"] + ([] if k else ["progress"]))
+    elif earlier_failed:
+        p.update(stage=f"{label}: running, after an earlier stage failed")
+    else:
+        p.update("green", stage=f"{label}: running", progress=(k - 1) / n)
+
+    t0 = time.time()
+    proc = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    sys.stderr.write(proc.stderr)
+    took = fmt_duration(time.time() - t0)
+    when = time.strftime("%Y-%m-%d %H:%M")
+    if proc.returncode != 0:
+        err = (proc.stderr.strip().splitlines() or [f"exit {proc.returncode}"])[-1]
+        p.update("red", stage=f"{label} failed at {when}", error=f"{name}: {err}"[:400],
+                 **{key: f"failed after {took}"})
+    elif earlier_failed:
+        p.update(stage=f"{label} ok, but an earlier stage failed", **{key: took})
+    elif last:
+        done = f"all {n} stages ok" if k else f"{name} ok"
+        p.update("green", stage=f"{done} at {when}", progress=1.0 if k else None, **{key: took})
+    else:
+        p.update("green", stage=f"{label} done", progress=k / n, **{key: took})
     return proc.returncode
 
 

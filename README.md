@@ -148,6 +148,24 @@ Network problems are printed and ignored, so monitoring never crashes the job.
 0 2 * * *  python3 -m monitor_client run laptop-backup --stale-after 26h -- rsync -a ~/Docs nas:/docs
 ```
 
+`--stale-after` turns the panel red if the job doesn't report at all in that long (laptop asleep,
+cron broken).
+
+**For a job made of several commands,** give each one `--stage` (and `--step K/N` for a progress bar)
+and the same panel name, so they show as stages of one job rather than separate panels:
+
+```bash
+0 2 * * *  cd ~/jobs && monitor-client run laptop-sync --stage fetch     --step 1/3 -- python fetch.py \
+                     && monitor-client run laptop-sync --stage transform --step 2/3 -- python transform.py \
+                     && monitor-client run laptop-sync --stage upload    --step 3/3 -- python upload.py
+```
+
+The panel shows the running stage, a progress bar and each stage's run time, and reads "all 3 stages
+ok at …" when the last one finishes. If a stage fails, the panel goes red with that stage's error.
+Stage 1 always starts a fresh run, and later stages never turn a failed run green, so a failure stays
+visible until the next run even if you chain with `;` instead of `&&`. The stages can also be
+separate cron entries or scripts, as long as they run in order.
+
 **For process and path checks** (no changes to the program being watched), add them in the feed editor
 with `on: laptop` (**+ process**, **+ path** templates), then run the agent on that machine:
 

@@ -99,3 +99,42 @@ def test_revoke(admin):
     assert bearer(tok).get("/api/agent").status_code == 200
     admin.delete("/api/tokens/temp")
     assert bearer(tok).get("/api/agent").status_code == 401
+
+
+def test_run_stages(admin, laptop_token, monkeypatch):
+    """`monitor-client run --stage`: several commands reporting as stages of one panel."""
+    import sys
+
+    import monitor_client
+    t = bearer(laptop_token)
+
+    def via_testclient(self, method, path, body=None, raise_errors=False):
+        r = t.request(method, path, json=body)
+        return r.json() if r.status_code < 400 else None
+    monkeypatch.setattr(monitor_client.Monitor, "_request", via_testclient)
+    run = lambda *a: monitor_client._cli(["run", "laptop-sync", *a])  # noqa: E731
+    ok_cmd = ["--", sys.executable, "-c", "pass"]
+    bad_cmd = ["--", sys.executable, "-c", "import sys; sys.exit('disk full')"]
+    panel = lambda: admin.get("/api/panels/laptop-sync").json()  # noqa: E731
+
+    assert run("--stage", "fetch", "--step", "1/3", *ok_cmd) == 0
+    p = panel()
+    assert p["status"] == "green" and p["stage"] == "fetch (1/3) done" and abs(p["progress"] - 1 / 3) < 1e-6
+    assert "fetch" in p["stats"]
+
+    assert run("--stage", "build", "--step", "2/3", *bad_cmd) == 1
+    p = panel()
+    assert p["status"] == "red" and p["error"] == "build: disk full"
+
+    # a later stage that succeeds (e.g. chained with ;) must not turn the failed run green
+    assert run("--stage", "upload", "--step", "3/3", *ok_cmd) == 0
+    p = panel()
+    assert p["status"] == "red" and "earlier stage failed" in p["stage"]
+    assert set(p["stats"]) == {"fetch", "build", "upload"}
+
+    # the next run's first stage starts fresh
+    for i, s in enumerate(["fetch", "build", "upload"], 1):
+        assert run("--stage", s, "--step", f"{i}/3", *ok_cmd) == 0
+    p = panel()
+    assert p["status"] == "green" and p["error"] is None and p["progress"] == 1.0
+    assert p["stage"].startswith("all 3 stages ok")
