@@ -2,8 +2,10 @@
 Monitor client — push updates from scripts, and run standard checks on this machine.
 Standard library only (uses psutil if installed, otherwise `ps`). Copy this one file anywhere.
 
+Install once per Python (editable: imports straight from the clone, updated by git pull):
+    python3 -m pip install --user -e ~/projects/monitor
 One-time setup on each machine (token from the dashboard: Edit feeds → Tokens):
-    python monitor_client.py login https://monitor.example.org <token>
+    monitor-client login https://monitor.example.org <token>
 
 In a Python job:
     from monitor_client import Monitor

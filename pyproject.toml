@@ -1,0 +1,19 @@
+# Makes the client installable on your own machines:  pip install -e ~/projects/monitor
+# Installs only monitor_client.py (standard library only, no dependencies) and a `monitor-client`
+# command. The server isn't packaged; it runs from the clone with requirements.txt.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monitor-client"
+version = "1.0.0"
+description = "Push status to the Monitor dashboard and run its process/path checks on this machine"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+monitor-client = "monitor_client:_cli"
+
+[tool.setuptools]
+py-modules = ["monitor_client"]

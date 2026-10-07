@@ -101,19 +101,30 @@ in front, e.g. Caddy: `monitor.yourdomain.org { reverse_proxy 127.0.0.1:8600 }`.
 
 **Once per machine:**
 
-1. In the dashboard: **Edit feeds → Tokens**, name it after the machine (`laptop`) and click
+1. Clone the repo and install the client into the Python your scripts use:
+   ```bash
+   git clone https://github.com/YOURNAME/monitor.git ~/projects/monitor
+   python3 -m pip install --user -e ~/projects/monitor
+   ```
+   This installs only `monitor_client.py` (standard library, no dependencies) as an *editable*
+   install: Python imports it straight from the clone, so a `git pull` updates it everywhere, and
+   there's no `sys.path` editing in your scripts. Repeat the `pip install -e` for each Python you run
+   jobs with (a conda env, a project venv, the one cron uses). On a machine where you can't install
+   anything, copying the single file next to your script also works.
+2. In the dashboard: **Edit feeds → Tokens**, name it after the machine (`laptop`) and click
    **New token**. By default it may update panels whose id starts `laptop-`. The dashboard shows a
    ready-to-paste command; the token isn't shown again.
-2. On the machine, put `monitor_client.py` somewhere (e.g. `~/bin/`) and run that command:
+3. Run that command on the machine (`monitor-client` was installed in step 1; if your shell can't
+   find it, use `python3 -m monitor_client` instead):
    ```bash
-   python3 ~/bin/monitor_client.py login https://monitor.yourdomain.org mon_xxxxxxxx
+   monitor-client login https://monitor.yourdomain.org mon_xxxxxxxx
    ```
-   This saves the URL and token to `~/.config/monitor/client.json`, readable only by you.
+   This saves the URL and token to `~/.config/monitor/client.json`, readable only by you, so scripts
+   never contain the token.
 
 **Then, for a Python job,** nothing else needs setting up. The panel appears on its first update:
 
 ```python
-import sys; sys.path.insert(0, "/Users/james/bin")    # wherever monitor_client.py lives
 from monitor_client import Monitor
 
 mon = Monitor()                                         # uses the saved login
@@ -134,16 +145,16 @@ Network problems are printed and ignored, so monitoring never crashes the job.
 **For a command or cron job:** wrap it, and it reports success, failure and the last error line:
 
 ```bash
-0 2 * * *  python3 ~/bin/monitor_client.py run laptop-backup --stale-after 26h -- rsync -a ~/Docs nas:/docs
+0 2 * * *  python3 -m monitor_client run laptop-backup --stale-after 26h -- rsync -a ~/Docs nas:/docs
 ```
 
 **For process and path checks** (no changes to the program being watched), add them in the feed editor
 with `on: laptop` (**+ process**, **+ path** templates), then run the agent on that machine:
 
 ```bash
-python3 ~/bin/monitor_client.py agent            # keep running (see deploy/ for launchd/systemd files)
-python3 ~/bin/monitor_client.py agent --once     # or one pass from cron every few minutes
-python3 ~/bin/monitor_client.py test process train.py    # try a check locally first
+monitor-client agent                  # keep running (see deploy/ for launchd/systemd files)
+monitor-client agent --once           # or one pass from cron every few minutes
+monitor-client test process train.py  # try a check locally first
 ```
 
 The agent only runs the built-in process/path checks with the settings the feed list gives them. It

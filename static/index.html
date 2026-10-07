@@ -436,7 +436,7 @@ $("tokform").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
     const t = await api("POST", "/api/tokens", { name: $("tokname").value.trim(), scope: $("tokscope").value.trim() || $("tokname").value.trim() + "-*" });
-    const cmd = `python3 monitor_client.py login ${location.origin} ${t.token}`;
+    const cmd = `monitor-client login ${location.origin} ${t.token}`;
     $("toknew").innerHTML = `<div class="tok-new"><b>Token for ${esc(t.name)}</b><span class="meta">Copy it now; it won't be shown again. On that machine run:</span>
       <code>${esc(cmd)}</code><button class="iconbtn" id="tokcopy" type="button">Copy command</button></div>`;
     $("tokcopy").onclick = () => navigator.clipboard?.writeText(cmd).then(() => ($("tokcopy").textContent = "Copied"));
