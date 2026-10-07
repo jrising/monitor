@@ -150,6 +150,7 @@ dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
   <button class="iconbtn" id="logout" hidden title="Log out">Log out</button>
 </header>
 <div class="banner" id="banner"></div>
+<div class="banner" id="checkswarn"></div>
 
 <h2>Priority</h2>
 <div class="grid" id="grid"></div>
@@ -180,6 +181,10 @@ dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
     <textarea id="cfg" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Feed definitions (YAML)"></textarea>
     <div class="side">
       <div><h3>Add</h3><div class="snips" id="snips"></div></div>
+      <div><h3>Alerts</h3>
+        <div id="alertinfo" class="meta"></div>
+        <button class="iconbtn" id="alerttest" type="button" style="margin-top:6px">Send test email</button>
+      </div>
       <div><h3>Fields</h3><dl>
         <dt>id</dt><dd>unique; scripts push to this name</dd>
         <dt>priority: true</dt><dd>block in the grid, not the list</dd>
@@ -255,6 +260,13 @@ async function refresh() {
     panels = d.panels; clockSkew = d.now - Date.now() / 1000;
     for (const p of panels) if (!p.poll_requested && p.status !== "yellow") waiting.delete(p.id);
     showBanner("");
+    // on shared hosting, scheduled checks depend on the cron job: say so if it has stopped
+    const stale = role === "admin" && d.last_check_run !== undefined && d.last_check_run !== null
+      ? d.now - d.last_check_run > 1200 : false;
+    const never = role === "admin" && d.last_check_run === null && "last_check_run" in d && panels.some((p) => p.check && !p.agent);
+    $("checkswarn").textContent = stale ? `Scheduled checks last ran ${ago(d.last_check_run)}: is the cron job running?`
+      : never ? "Scheduled checks haven't run yet: add the cron job (see README), or wait for its next run." : "";
+    $("checkswarn").style.display = stale || never ? "block" : "none";
     $("updated").textContent = `refreshed ${new Date().toLocaleTimeString()} · click a light to check it now`;
   } catch (e) {
     if (e.message !== "401") showBanner("Can't reach the monitor server — showing last known state.");
@@ -380,6 +392,7 @@ $("q").addEventListener("input", (e) => { query = e.target.value; render(); });
 /* ---------- feed editor ---------- */
 const STATIC_SNIPPETS = {
   "pushed job": `  - id: nightly-backup\n    name: Nightly backup\n    group: servers\n    stale_after: 26h\n`,
+  "alerts": `alerts:\n  email: you@example.org        # or a list: [you@example.org, other@example.org]\n  panels: all                   # all, priority, or none (per panel: alert: true / false)\n  after: 0m                     # only alert once something has been red this long\n  recovery: true                # also email when it's back to green\n  # repeat: 24h                 # remind while still red\n`,
   "embed": `  - id: grafana-cpu\n    name: CPU graph\n    group: servers\n    priority: true\n    embed: https://example.org/dashboard/panel\n    height: 220\n`,
 };
 let SNIPPETS = {};
@@ -400,7 +413,7 @@ async function openEditor() {
     const perr = Object.entries(c.plugin_errors || {});
     if (perr.length) edMsg("Check plugins that failed to load: " + perr.map(([k, v]) => `${k} (${v})`).join("; "), "bad");
     $("snips").innerHTML = Object.keys(SNIPPETS).map((k) => `<button class="chip" data-snip="${esc(k)}">+ ${esc(k)}</button>`).join("");
-    renderPushed(); loadTokens(); $("toknew").innerHTML = ""; if (!perr.length) edMsg("");
+    renderPushed(); loadTokens(); loadAlerts(); $("toknew").innerHTML = ""; if (!perr.length) edMsg("");
     $("editor").classList.add("open"); ed.focus();
   } catch (e) { if (e.message !== "401") showBanner("Couldn't open the editor: " + e.message); }
 }
@@ -415,7 +428,7 @@ async function saveConfig(dry) {
     const r = await api("PUT", "/api/config", { text: ed.value, dry_run: dry });
     if (!dry) savedText = ed.value;
     edMsg((dry ? `Looks good: ${r.panels} panels.` : `Saved ${r.panels} panels.` + (r.checking?.length ? ` Checking ${r.checking.join(", ")} now.` : "")) + (r.note ? " " + r.note : ""), "good");
-    if (!dry) setTimeout(refresh, 400);
+    if (!dry) { setTimeout(refresh, 400); loadAlerts(); }
   } catch (e) { if (e.message !== "401") edMsg(e.message, "bad"); }
 }
 function closeEditor() {
@@ -443,6 +456,28 @@ $("tokform").addEventListener("submit", async (e) => {
     $("tokname").value = $("tokscope").value = ""; loadTokens();
   } catch (err) { if (err.message !== "401") edMsg(err.message, "bad"); }
 });
+async function loadAlerts() {
+  try {
+    const a = await api("GET", "/api/alerts");
+    const c = a.config;
+    let html = c
+      ? `Emails ${esc(c.email.join(", "))} when ${c.panels === "all" ? "any panel" : c.panels === "priority" ? "a priority panel" : "a panel with alert: true"}` +
+        (c.after ? ` has been red for ${Math.round(c.after / 60)} min` : " goes red") + (c.recovery ? ", and when it recovers." : ".")
+      : "Off. Add an <code>alerts:</code> section (+ alerts) and save.";
+    if (c && !a.email_via) html += ` <span style="color:var(--red)">The server can't send email yet: set MONITOR_SMTP_HOST etc. in monitor.env.</span>`;
+    else if (c) html += ` Sent via ${esc(a.email_via)}.`;
+    if (a.last_error) html += `<br><span style="color:var(--red)">Last attempt failed ${ago(a.last_error.ts)}: ${esc(a.last_error.error)}</span>`;
+    else if (a.last_alert) html += `<br>Last alert ${ago(a.last_alert.ts)}: ${esc(a.last_alert.subject)}`;
+    $("alertinfo").innerHTML = html;
+    $("alerttest").hidden = !c;
+  } catch {}
+}
+$("alerttest").onclick = async () => {
+  $("alerttest").textContent = "Sending…";
+  try { const r = await api("POST", "/api/alerts/test"); edMsg(`Test email sent to ${r.sent_to.join(", ")}.`, "good"); }
+  catch (err) { if (err.message !== "401") edMsg("Test email failed: " + err.message, "bad"); }
+  $("alerttest").textContent = "Send test email"; loadAlerts();
+};
 $("editbtn").onclick = openEditor;
 $("edclose").onclick = closeEditor;
 $("edcheck").onclick = () => saveConfig(true);
@@ -454,6 +489,12 @@ ed.addEventListener("keydown", (e) => {
 });
 $("editor").addEventListener("click", async (e) => {
   const s = e.target.closest("[data-snip]");
+  if (s && s.dataset.snip === "alerts") {
+    if (/^alerts:/m.test(ed.value)) { edMsg("There's already an alerts: section."); return; }
+    ed.value = ed.value.replace(/\s*$/, "\n") + "\n" + SNIPPETS.alerts;
+    ed.focus(); ed.scrollTop = ed.scrollHeight; edMsg("Put your address in the new alerts: section at the bottom, then Save.");
+    return;
+  }
   if (s) {
     const t = ed.value.replace(/\s*$/, "\n");
     ed.value = t + (/^panels:/m.test(t) ? "" : "panels:\n") + "\n" + SNIPPETS[s.dataset.snip];

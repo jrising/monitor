@@ -78,7 +78,10 @@ setenv() {  # set KEY=VALUE in monitor.env unless the key already has a value
 setenv MONITOR_SCHEDULER external
 setenv MONITOR_REFRESH 30
 setenv MONITOR_AGENT_INTERVAL 60
+setenv MONITOR_PUBLIC_URL "https://$DOMAIN"
 grep -Eq '^MONITOR_PASSWORD=.+' "$ENVF" && ok "monitor.env has a password" || bad "set MONITOR_PASSWORD= in $ENVF"
+grep -Eq '^MONITOR_SMTP_HOST=.+' "$ENVF" && ok "email alerts can be sent ($(grep -E '^MONITOR_SMTP_HOST=' "$ENVF" | cut -d= -f2))" \
+  || note "to get alert emails, set MONITOR_SMTP_HOST/USER/PASSWORD in $ENVF (see the comments there)"
 chmod 600 "$ENVF"; mkdir -p "$APP/data"; chmod 700 "$APP/data"
 
 # --- 4. the web folder: only the launcher and .htaccess ------------------------------------

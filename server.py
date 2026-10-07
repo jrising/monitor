@@ -13,6 +13,8 @@ Settings come from environment variables or a `monitor.env` file next to this sc
                      created in the dashboard: Edit feeds → Tokens)
   MONITOR_DATA       folder for the database and feed list (default: data/ next to this file)
   SECRET_*           values that check specs can reference as ${SECRET_NAME} (API keys etc.)
+  MONITOR_PUBLIC_URL the dashboard's address, used for links in alert emails
+  MONITOR_SMTP_*     how alert emails are sent (see notify.py)
 
 Kinds of check live in checks/ — one file per family; drop a new file there to add one.
 
@@ -70,6 +72,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import checks  # noqa: E402
+import notify  # noqa: E402
 from checks import LOAD_ERRORS, REGISTRY  # noqa: E402
 
 checks.load_all()
@@ -89,6 +92,7 @@ REFRESH_SECONDS = int(os.environ.get("MONITOR_REFRESH", "5"))          # dashboa
 AGENT_INTERVAL = int(os.environ.get("MONITOR_AGENT_INTERVAL", "15"))  # how often agents check in
 HISTORY_LEN = 24
 SESSION_DAYS = 30
+PUBLIC_URL = os.environ.get("MONITOR_PUBLIC_URL", "").rstrip("/")
 AGENT_OFFLINE_AFTER = 15 * 60  # an agent unseen this long shows its panels as unknown
 SLUG = re.compile(r"[A-Za-z0-9._-]+")
 
@@ -132,10 +136,14 @@ _db.executescript(
     );
     CREATE TABLE IF NOT EXISTS agents (name TEXT PRIMARY KEY, last_seen REAL);
     CREATE TABLE IF NOT EXISTS login_fails (ip TEXT, ts REAL);
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS alert_state (
+        panel_id TEXT PRIMARY KEY, status TEXT, since REAL, message TEXT, alerted INTEGER DEFAULT 0, last_sent REAL
+    );
     """
 )
 _have = {r[1] for r in _db.execute("PRAGMA table_info(panels)")}
-for _col in ("agent TEXT", "display TEXT"):  # upgrade databases from older versions
+for _col in ("agent TEXT", "display TEXT", "alert INTEGER"):  # upgrade databases from older versions
     if _col.split()[0] not in _have:
         _db.execute(f"ALTER TABLE panels ADD COLUMN {_col}")
 _db.commit()
@@ -158,6 +166,16 @@ def write(sql: str, params: tuple = ()) -> None:
     with _lock:
         _db.execute(sql, params)
         _db.commit()
+
+
+def meta_get(key: str, default=None):
+    r = q1("SELECT value FROM meta WHERE key=?", (key,))
+    return json.loads(r["value"]) if r else default
+
+
+def meta_set(key: str, value) -> None:
+    write("INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          (key, json.dumps(value)))
 
 
 def _row(panel_id: str) -> Optional[sqlite3.Row]:
@@ -342,7 +360,109 @@ def tick(force: bool = False) -> list[str]:
             upsert(r["id"], {"status": "red", "error": str(e)})
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(run_check, due))
+    meta_set("last_tick", time.time())
+    evaluate_alerts()
     return due
+
+
+# ---------------------------------------------------------------- alerts
+# Evaluated after each tick (cron, every few minutes) or every minute with the internal scheduler, so
+# panels that go red for any reason are caught: a failed check, a pushed error, or a job that stopped
+# reporting (stale_after). One email per panel when it goes red (after `after:` if set), one when it's
+# green again, and optional reminders (`repeat:`). Everything that happens in one evaluation is one email.
+def _alert_enabled(row: sqlite3.Row, cfg: dict) -> bool:
+    if row["alert"] is not None:
+        return bool(row["alert"])
+    return cfg["panels"] == "all" or (cfg["panels"] == "priority" and bool(row["priority"]))
+
+
+def evaluate_alerts(now: Optional[float] = None) -> list[dict]:
+    """Work out which alert emails are due, send them (as one email) and record that.
+    Returns the events. If sending fails, nothing is recorded, so they're retried next time."""
+    cfg = meta_get("alerts")
+    if not cfg:
+        return []
+    now = now or time.time()
+    agents = _agents_seen()
+    states = {r["panel_id"]: r for r in q("SELECT * FROM alert_state")}
+    events, updates = [], []
+    for row in q("SELECT * FROM panels"):
+        p = to_dict(row, full=False, agents=agents)
+        st = states.get(p["id"])
+        enabled = _alert_enabled(row, cfg)
+        msg = p.get("error") or p.get("stage") or ""
+        if p["status"] == "red":
+            if st is None or st["status"] != "red":     # just went red: start the clock
+                st = {"panel_id": p["id"], "status": "red", "since": now, "message": msg, "alerted": 0, "last_sent": None}
+                updates.append(dict(st))
+            if not enabled:
+                continue
+            if not st["alerted"] and now - st["since"] >= cfg["after"]:
+                events.append({"kind": "down", "panel": p, "since": st["since"], "message": msg})
+                updates.append({**st, "message": msg, "alerted": 1, "last_sent": now})
+            elif st["alerted"] and cfg.get("repeat") and now - (st["last_sent"] or 0) >= cfg["repeat"]:
+                events.append({"kind": "still", "panel": p, "since": st["since"], "message": msg})
+                updates.append({**st, "message": msg, "last_sent": now})
+        elif p["status"] == "green" and st is not None and st["status"] == "red":
+            if st["alerted"] and enabled and cfg["recovery"]:
+                events.append({"kind": "up", "panel": p, "since": st["since"], "message": st["message"]})
+            updates.append({"panel_id": p["id"], "status": "green", "since": now, "message": "", "alerted": 0,
+                            "last_sent": None})
+        # yellow / grey (checking, warning, agent offline) neither raise nor clear an alert
+    if events:
+        subject, body = _alert_email(events)
+        try:
+            notify.send_email(cfg["email"], subject, body)
+            meta_set("alert_error", None)
+            meta_set("last_alert", {"ts": now, "subject": subject})
+        except notify.NotifyError as e:
+            meta_set("alert_error", {"ts": now, "error": str(e)})
+            print(f"[monitor] alert email failed: {e}", file=sys.stderr)
+            # record only state changes that aren't about sending, so the emails are retried next time
+            sent_ids = {e2["panel"]["id"] for e2 in events}
+            updates = [u for u in updates
+                       if u["panel_id"] not in sent_ids or (u["status"] == "red" and not u["alerted"])]
+            events = []
+    with _lock:
+        for u in updates:
+            _db.execute("INSERT INTO alert_state VALUES (:panel_id, :status, :since, :message, :alerted, :last_sent) "
+                        "ON CONFLICT(panel_id) DO UPDATE SET status=excluded.status, since=excluded.since, "
+                        "message=excluded.message, alerted=excluded.alerted, last_sent=excluded.last_sent", u)
+        _db.commit()
+    return events
+
+
+def _alert_email(events: list[dict]) -> tuple[str, str]:
+    def name(e):
+        return e["panel"]["name"]
+    downs = [e for e in events if e["kind"] in ("down", "still")]
+    ups = [e for e in events if e["kind"] == "up"]
+    if len(events) == 1:
+        e = events[0]
+        subject = {"down": "DOWN", "still": "STILL DOWN", "up": "RECOVERED"}[e["kind"]] + f": {name(e)}"
+    else:
+        parts = []
+        if downs:
+            parts.append(f"{len(downs)} down ({', '.join(map(name, downs[:3]))}{', …' if len(downs) > 3 else ''})")
+        if ups:
+            parts.append(f"{len(ups)} recovered")
+        subject = "; ".join(parts)
+    lines = []
+    for e in downs + ups:
+        p = e["panel"]
+        dur = _ago(time.time() - e["since"])
+        if e["kind"] == "up":
+            lines.append(f"RECOVERED  {p['name']} ({p['id']}), after {dur} down")
+        else:
+            lines.append(f"{'DOWN' if e['kind'] == 'down' else 'STILL DOWN'}  {p['name']} ({p['id']}), for {dur}")
+            if e["message"]:
+                lines.append(f"    {e['message']}")
+            if p.get("url"):
+                lines.append(f"    {p['url']}")
+    if PUBLIC_URL:
+        lines += ["", f"Dashboard: {PUBLIC_URL}"]
+    lines += ["", "Change who gets these and for which panels in the dashboard: Edit feeds → alerts."]
+    return f"[monitor] {subject}", "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------- feed list (monitor.yaml)
@@ -362,15 +482,57 @@ def _seconds(v) -> Optional[int]:
 
 
 PANEL_KEYS = {"id", "name", "group", "priority", "sort", "url", "check", "schedule", "stale_after", "on",
-              "embed", "height"}
+              "embed", "height", "alert"}
+ALERT_KEYS = {"email", "panels", "after", "recovery", "repeat"}
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def parse_config(text: str) -> list[dict]:
-    """Validate feed-list text; returns normalized panel definitions or raises ConfigError."""
+def parse_alerts(a) -> Optional[dict]:
+    """Validate the feed list's `alerts:` section."""
+    if a is None:
+        return None
+    if not isinstance(a, dict):
+        raise ConfigError("alerts: must be a mapping (email:, panels:, after:, recovery:, repeat:)")
+    unknown = set(a) - ALERT_KEYS
+    if unknown:
+        raise ConfigError(f"alerts: unknown key(s) {', '.join(sorted(unknown))}")
+    emails = a.get("email") or []
+    emails = [emails] if isinstance(emails, str) else list(emails)
+    bad = [e for e in emails if not isinstance(e, str) or not EMAIL.match(e)]
+    if bad or not emails:
+        raise ConfigError(f"alerts: email needs one or more addresses{' (bad: ' + ', '.join(map(str, bad)) + ')' if bad else ''}")
+    which = str(a.get("panels", "all"))
+    if which not in ("all", "priority", "none"):
+        raise ConfigError("alerts: panels must be all, priority or none (or set alert: per panel)")
+    try:
+        after, repeat = _seconds(a.get("after", 0)), _seconds(a.get("repeat"))
+    except ConfigError as e:
+        raise ConfigError(f"alerts: {e}") from None
+    return {"email": emails, "panels": which, "after": after or 0, "recovery": bool(a.get("recovery", True)),
+            "repeat": repeat}
+
+
+def parse_feed(text: str) -> tuple[list[dict], Optional[dict]]:
+    """Validate feed-list text: (panel definitions, alerts settings or None)."""
     try:
         cfg = yaml.safe_load(text) or {}
     except yaml.YAMLError as e:
         raise ConfigError(f"YAML syntax: {e}") from None
+    if not isinstance(cfg, dict):
+        raise ConfigError("the file must have a top-level `panels:` list")
+    unknown = set(cfg) - {"panels", "alerts"}
+    if unknown:
+        raise ConfigError(f"unknown top-level key(s) {', '.join(map(str, sorted(unknown)))} (expected panels:, alerts:)")
+    return parse_config(text, cfg), parse_alerts(cfg.get("alerts"))
+
+
+def parse_config(text: str, cfg: Optional[dict] = None) -> list[dict]:
+    """Validate feed-list text; returns normalized panel definitions or raises ConfigError."""
+    if cfg is None:
+        try:
+            cfg = yaml.safe_load(text) or {}
+        except yaml.YAMLError as e:
+            raise ConfigError(f"YAML syntax: {e}") from None
     if not isinstance(cfg, dict) or not isinstance(cfg.get("panels", []), (list, type(None))):
         raise ConfigError("the file must have a top-level `panels:` list")
     out, seen = [], set()
@@ -432,6 +594,8 @@ def parse_config(text: str) -> list[dict]:
         url = p.get("url")
         if url is not None and not re.match(r"^https?://", str(url)):
             raise ConfigError(f"{where}: url must start with http:// or https://")
+        if p.get("alert") is not None and not isinstance(p["alert"], bool):
+            raise ConfigError(f"{where}: alert must be true or false")
         out.append({
             "id": pid, "name": str(p.get("name", pid)), "grp": str(p.get("group", "misc")),
             "priority": int(bool(p.get("priority", False))), "sort": int(p.get("sort", i)),
@@ -439,12 +603,14 @@ def parse_config(text: str) -> list[dict]:
             "schedule": str(p["schedule"]) if p.get("schedule") is not None else None,
             "stale_after": stale, "agent": agent, "from_config": 1,
             "display": json.dumps(display) if display else None,
+            "alert": None if p.get("alert") is None else int(p["alert"]),
         })
     return out
 
 
-def apply_config(panels: list[dict]) -> list[str]:
+def apply_config(panels: list[dict], alerts: Optional[dict] = None) -> list[str]:
     """Write definitions to the DB; returns server-side ids whose check changed (to run right away)."""
+    meta_set("alerts", alerts)
     changed, seen = [], set()
     for p in panels:
         seen.add(p["id"])
@@ -471,7 +637,7 @@ def apply_config(panels: list[dict]) -> list[str]:
 def load_config_file() -> list[str]:
     if not CONFIG_PATH.exists():
         return []
-    return apply_config(parse_config(CONFIG_PATH.read_text()))
+    return apply_config(*parse_feed(CONFIG_PATH.read_text()))
 
 
 def _run_soon(ids: list[str]) -> None:
@@ -503,6 +669,7 @@ def init() -> None:
             except ValueError as e:
                 upsert(r["id"], {"status": "red", "error": str(e)})
             scheduler.add_job(run_check, args=[r["id"]], id=f"startup:{r['id']}")  # check once now
+        scheduler.add_job(evaluate_alerts, IntervalTrigger(minutes=1), id="alerts")
         scheduler.start()
 
 
@@ -650,7 +817,13 @@ class AgentResults(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    """Liveness, plus whether scheduled checks are actually running (for an outside monitor to watch:
+    on DreamHost they depend on the cron job). checks_running is false if the last run was >20 min ago."""
+    if SCHED_MODE == "internal":
+        return {"ok": True, "checks_running": scheduler.running}
+    last = meta_get("last_tick")
+    return {"ok": True, "checks_running": bool(last and time.time() - last < 1200),
+            "last_check_run": int(time.time() - last) if last else None}
 
 
 @app.post("/api/login")
@@ -687,14 +860,16 @@ def me(request: Request):
         role = w.role if w.role == "admin" else None
     except HTTPException:
         role = None
-    return {"role": role, "password_set": bool(PASSWORD), "scheduler": SCHED_MODE, "refresh": REFRESH_SECONDS}
+    last = meta_get("last_tick") if SCHED_MODE != "internal" else None
+    return {"role": role, "password_set": bool(PASSWORD), "scheduler": SCHED_MODE, "refresh": REFRESH_SECONDS,
+            "last_check_run": last}
 
 
 @app.get("/api/panels")
 def list_panels(w: Who = Depends(who)):
     rows = q("SELECT * FROM panels ORDER BY priority DESC, grp, sort, name")
     agents = _agents_seen()
-    return {"now": time.time(),
+    return {"now": time.time(), "last_check_run": meta_get("last_tick") if SCHED_MODE != "internal" else None,
             "panels": [to_dict(r, agents=agents) for r in rows if w.allows(r["id"], r["agent"])]}
 
 
@@ -821,12 +996,17 @@ def get_config(w: Who = Depends(admin_only)):
 @app.put("/api/config")
 def put_config(body: ConfigText, w: Who = Depends(admin_only)):
     try:
-        panels = parse_config(body.text)
+        panels, alerts = parse_feed(body.text)
     except ConfigError as e:
         raise HTTPException(422, str(e))
     known = {r["name"] for r in q("SELECT name FROM tokens")} | ({"env"} if ENV_TOKEN else set())
     unknown_agents = sorted({p["agent"] for p in panels if p["agent"] and p["agent"] not in known})
-    note = (f"No token named {', '.join(unknown_agents)} yet — create one under Tokens." if unknown_agents else None)
+    notes = []
+    if unknown_agents:
+        notes.append(f"No token named {', '.join(unknown_agents)} yet — create one under Tokens.")
+    if alerts and not notify.email_configured():
+        notes.append("Alerts are set, but the server can't send email yet: set MONITOR_SMTP_HOST etc. in monitor.env.")
+    note = " ".join(notes) or None
     if body.dry_run:
         return {"ok": True, "panels": len(panels), "note": note}
     if CONFIG_PATH.exists():
@@ -834,7 +1014,7 @@ def put_config(body: ConfigText, w: Who = Depends(admin_only)):
     tmp = CONFIG_PATH.with_suffix(".yaml.tmp")
     tmp.write_text(body.text)
     tmp.replace(CONFIG_PATH)
-    changed = apply_config(panels)
+    changed = apply_config(panels, alerts)
     _run_soon(changed)
     return {"ok": True, "panels": len(panels), "checking": changed, "note": note}
 
@@ -847,6 +1027,28 @@ def reload_config(w: Who = Depends(admin_only)):
         raise HTTPException(422, str(e))
     _run_soon(changed)
     return {"reloaded": True}
+
+
+# --- alerts
+@app.get("/api/alerts")
+def alerts_info(w: Who = Depends(admin_only)):
+    return {"config": meta_get("alerts"), "email_via": notify.email_configured(),
+            "last_error": meta_get("alert_error"), "last_alert": meta_get("last_alert"),
+            "down": [dict(r) for r in q("SELECT panel_id, since, alerted FROM alert_state WHERE status='red'")]}
+
+
+@app.post("/api/alerts/test")
+def alerts_test(w: Who = Depends(admin_only)):
+    cfg = meta_get("alerts")
+    if not cfg:
+        raise HTTPException(400, "add an alerts: section with your email to the feed list and save first")
+    try:
+        notify.send_email(cfg["email"], "[monitor] test email",
+                          "This is a test from your monitor dashboard. Alerts will arrive like this.\n"
+                          + (f"\nDashboard: {PUBLIC_URL}\n" if PUBLIC_URL else ""))
+    except notify.NotifyError as e:
+        raise HTTPException(502, str(e))
+    return {"sent_to": cfg["email"], "via": notify.email_configured()}
 
 
 # --- tokens
@@ -901,6 +1103,12 @@ if __name__ == "__main__":
             text = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else ""
             print(f"ok: {len(parse_config(text))} panels")
         else:
+            import fcntl
+            lock = open(DATA_DIR / ".tick.lock", "w")
+            try:  # a previous tick still running (slow checks): let it finish rather than double up
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                sys.exit(0)
             load_config_file()  # pick up edits made directly to the file
             ran = tick(force=a.all)
             if ran:

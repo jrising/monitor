@@ -16,6 +16,7 @@
 #                `monitor_client.py agent`). Without `on`, they look at the monitor's own host.
 #   schedule:    "every 15m" / "every 2h", or cron "0 * * * *"
 #   stale_after: "26h" -> red if nothing has reported for that long (for pushed jobs)
+#   alert:       true/false: email about this panel or not (overrides alerts: panels: below)
 #
 # Panels that only receive pushes don't need to be listed — the first push creates them.
 
@@ -71,3 +72,11 @@ panels:
     group: finance
     check: {type: quote, symbol: VTI, below: 250}
     schedule: "*/30 9-16 * * 1-5"
+
+# Email when something goes red, and when it recovers (needs MONITOR_SMTP_* in monitor.env).
+alerts:
+  email: you@example.org          # or a list: [you@example.org, other@example.org]
+  panels: all                     # all, priority, or none (then per panel: alert: true)
+  after: 0m                       # only alert once something has been red this long
+  recovery: true                  # also email when it's green again
+  # repeat: 24h                   # remind while still red

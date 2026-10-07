@@ -22,6 +22,8 @@ monitor_client.py     for your machines: push API, agent, CLI (standard library 
 monitor_client.R      the push API for R scripts (source() it)
 static/index.html     the dashboard and feed editor
 deploy/               DreamHost setup, update script, systemd/launchd files for the agent
+notify.py             sending alert emails
+tools/                one-off helpers, e.g. importing monitors from UptimeRobot
 tests/                pytest suite (runs on GitHub on every push)
 data/                 your feed list and database (not in git)
 monitor.env           your password and settings (not in git; see monitor.env.example)
@@ -227,6 +229,56 @@ previous version (`data/monitor.yaml.bak`) and runs new checks immediately. Usef
   The site must allow being framed.
 * `${SECRET_NAME}` inside a check: replaced by `SECRET_NAME=…` from `monitor.env`, so API keys stay out
   of the feed list.
+
+## Alert emails
+
+Add an `alerts:` section to the feed list (**+ alerts** in the editor) and tell the server how to send
+mail in `monitor.env`:
+
+```yaml
+alerts:
+  email: you@example.org          # or a list
+  panels: all                     # all, priority, or none; per panel `alert: true/false` overrides
+  after: 0m                       # only alert once something has been red this long
+  recovery: true                  # also email when it's green again
+  # repeat: 24h                   # remind while still red
+```
+
+```bash
+# monitor.env. On DreamHost, create a mailbox such as monitor@yourdomain.org for this.
+MONITOR_SMTP_HOST=smtp.dreamhost.com
+MONITOR_SMTP_PORT=587
+MONITOR_SMTP_USER=monitor@yourdomain.org
+MONITOR_SMTP_PASSWORD=...
+```
+
+Then **Send test email** in the editor's Alerts box. You get one email when a panel goes red and one when
+it's green again, not one per check. Whatever happens in the same check run arrives as a single email.
+Red means anything: a failed check, an error a script pushed, or a job that stopped reporting
+(`stale_after`). Yellow and grey (agent offline, e.g. laptop asleep) don't alert. Website and port
+checks re-try once, 5 s later, before turning red, so a single dropped request doesn't email you.
+
+Alerts are worked out after each scheduled check run: on DreamHost that's the cron job (every 5
+minutes), elsewhere every minute. If sending fails (wrong password, say), the Alerts box shows the
+error and the emails are retried on the next run.
+
+**Who watches the monitor?** If DreamHost, or the cron job, stops, nothing here can tell you. Keep one
+free external check on the monitor itself, e.g. an UptimeRobot keyword monitor on
+`https://monitor.yourdomain.org/api/health` looking for `"checks_running":true` (false when scheduled
+checks haven't run for 20 minutes). The dashboard also shows a warning when that happens.
+
+## Moving monitors over from UptimeRobot
+
+```bash
+python3 tools/import_uptimerobot.py --api-key <read-only API key> > uptimerobot.yaml
+```
+
+prints feed-list entries for all your UptimeRobot monitors: website and keyword monitors become
+`http` checks (`contains:` / `lacks:`), port monitors become `tcp` checks, intervals become schedules,
+heartbeats become pushed panels with `stale_after`. Things that don't translate directly (ping,
+heartbeats, basic auth) get a `NOTE` comment. Paste the entries under `panels:` in the editor, check,
+save. Use a read-only key (UptimeRobot: Integrations & API → API). The tool tries UptimeRobot's v2 API,
+then v3; if neither works, save the monitor list as JSON and use `--from-json monitors.json`.
 
 ## Security
 
