@@ -19,6 +19,7 @@ Nothing ever runs an arbitrary shell command. New kinds of check are small Pytho
 server.py             web app, API, scheduler; `python server.py tick` for cron
 checks/               check types, one file per family; add files here to extend
 monitor_client.py     for your machines: push API, agent, CLI (standard library only)
+monitor_client.R      the push API for R scripts (source() it)
 static/index.html     the dashboard and feed editor
 deploy/               DreamHost setup, update script, systemd/launchd files for the agent
 tests/                pytest suite (runs on GitHub on every push)
@@ -142,6 +143,14 @@ with run.track("writing netCDF"):       # red with the exception message if this
 Other calls: `run.warn("slow")` (yellow), `run.error("diverged")` (red), `run.stats(loss=0.03)`.
 Network problems are printed and ignored, so monitoring never crashes the job.
 
+**Calling it inside loops is fine.** Updates are sent from a background thread, so calls return
+immediately (about 7 µs each, however slow the server). Routine updates (progress, stage, stats) are
+combined and sent at most every 5 seconds per panel, latest values winning; a status change, a new
+error, completion (`done()`, progress 1) and a panel's first update are sent at once. Anything still
+pending is sent when the script exits, or call `mon.flush()`. Change the interval with
+`Monitor(min_interval=…)` or `MONITOR_MIN_INTERVAL`; `Monitor(background=False)` sends every call
+synchronously.
+
 **For a command or cron job:** wrap it, and it reports success, failure and the last error line:
 
 ```bash
@@ -165,6 +174,32 @@ ok at …" when the last one finishes. If a stage fails, the panel goes red with
 Stage 1 always starts a fresh run, and later stages never turn a failed run green, so a failure stays
 visible until the next run even if you chain with `;` instead of `&&`. The stages can also be
 separate cron entries or scripts, as long as they run in order.
+
+**From R:** `source()` the R client from the clone. It uses the same saved login (from
+`monitor-client login`) and needs the `curl` and `jsonlite` packages.
+
+```r
+source("~/projects/monitor/monitor_client.R")
+
+run <- monitor_panel("laptop-calibration", name = "IAM calibration", group = "laptop",
+                     priority = TRUE, stale_after = "2h")
+run$catch_errors()            # in Rscript/cron: any uncaught error turns the panel red
+run$stage("loading data")
+for (i in seq_along(regions)) {
+  fit(regions[i])
+  run$progress(i / length(regions), stage = paste("region", i), n_results = i)
+}
+run$track("writing outputs", write_outputs())   # red with the error message if it fails
+run$done(n_results = length(regions))
+```
+
+The same calls as in Python: `run$ok()`, `run$warn("slow")`, `run$error("diverged")`,
+`run$stats(loss = 0.03)`, `run$update(...)`. As in Python, network problems only give a warning, and
+updates are throttled the same way, so `run$progress()` can go in a loop (about 20–30 µs a call). R
+has no threads, so a send doesn't wait for the server: it completes during your later calls.
+`run$done()`, `run$error()`, `run$flush()` and the end of the R session wait (up to 5 s) until
+everything is delivered. Set the interval with `monitor_connect(min_interval = …)`, e.g.
+`monitor_panel("laptop-x", monitor = monitor_connect(min_interval = 1))`.
 
 **For process and path checks** (no changes to the program being watched), add them in the feed editor
 with `on: laptop` (**+ process**, **+ path** templates), then run the agent on that machine:
@@ -218,4 +253,4 @@ Scripts authenticate with `Authorization: Bearer <token>`.
 | GET / POST / DELETE | `/api/tokens` | login | machine tokens |
 | GET | `/api/health` | anyone | liveness |
 
-R, for example: `httr::PUT(paste0(url, "/api/panels/laptop-fit"), add_headers(Authorization = paste("Bearer", tok)), body = list(status = "ok", stats = list(n = 12)), encode = "json")`.
+For R, use `monitor_client.R` (above) rather than calling the API directly.

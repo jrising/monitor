@@ -26,11 +26,17 @@ Run the feed list's process/path checks assigned to this machine (`on: <token na
     python monitor_client.py agent            # stays running; answers dashboard clicks within ~15 s
     python monitor_client.py agent --once     # one pass, for cron
 
+Updates are sent from a background thread and throttled, so calling run.progress() on every
+iteration of a fast loop is fine: routine updates go out at most every few seconds (latest values
+win), while a status change, an error, completion or a panel's first update go out at once. Anything
+still pending is sent when the program exits (or call mon.flush()).
+
 Network failures never raise: monitoring must not crash the thing being monitored.
 """
 from __future__ import annotations
 
 import argparse
+import atexit
 import concurrent.futures
 import contextlib
 import fnmatch
@@ -47,6 +53,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+STATUS_ALIASES = {
+    "green": "green", "ok": "green", "good": "green", "up": "green", "running": "green", "done": "green",
+    "yellow": "yellow", "checking": "yellow", "warn": "yellow", "warning": "yellow", "pending": "yellow",
+    "red": "red", "error": "red", "stopped": "red", "down": "red", "failed": "red", "fail": "red",
+    "grey": "grey", "gray": "grey", "unknown": "grey",
+}
+STATE_FIELDS = ("status", "stage", "error", "progress", "stats")
+DEFAULT_MIN_INTERVAL = float(os.environ.get("MONITOR_MIN_INTERVAL", "5"))
+
 CONFIG_FILE = Path(os.environ.get("MONITOR_CLIENT_CONFIG", Path.home() / ".config" / "monitor" / "client.json"))
 
 
@@ -57,14 +72,139 @@ def _saved_login() -> dict:
         return {}
 
 
+def _effects(u: dict) -> dict:
+    """What one update does on the server, per field: ("set", v) / ("clear",) for plain fields,
+    ("merge", d) / ("replace", d) for stats. (The server applies `clear` after the other fields.)"""
+    eff = {}
+    for k, v in u.items():
+        if k in ("clear", "replace_stats"):
+            continue
+        if k == "stats":
+            eff[k] = ("replace" if u.get("replace_stats") else "merge", dict(v))
+        else:
+            eff[k] = ("set", v)
+    for k in u.get("clear") or []:
+        if k in STATE_FIELDS:
+            eff[k] = ("replace", {}) if k == "stats" else ("clear",)
+    return eff
+
+
+def merge_updates(old: Optional[dict], new: dict) -> dict:
+    """Combine two panel updates into one with the same effect as sending them in order."""
+    eff = _effects(old or {})
+    for k, e in _effects(new).items():
+        if k == "stats" and e[0] == "merge" and k in eff:  # merge on top of an earlier merge/replace
+            eff[k] = (eff[k][0], {**eff[k][1], **e[1]})
+        else:
+            eff[k] = e
+    body: dict[str, Any] = {}
+    clear = []
+    for k, e in eff.items():
+        if e[0] == "set":
+            body[k] = e[1]
+        elif e[0] == "clear" or (e[0] == "replace" and not e[1]):
+            clear.append(k)
+        else:
+            body[k] = e[1]
+            if e[0] == "replace":
+                body["replace_stats"] = True
+    if clear:
+        body["clear"] = sorted(clear)
+    return body
+
+
 class Monitor:
+    """Connection to the dashboard. Panel updates go through a background sender that throttles
+    routine updates to one per `min_interval` seconds per panel (default 5, or MONITOR_MIN_INTERVAL)
+    and sends important ones at once. background=False sends every update synchronously instead."""
+
     def __init__(self, url: Optional[str] = None, token: Optional[str] = None,
-                 timeout: float = 10.0, quiet: bool = False):
+                 timeout: float = 10.0, quiet: bool = False, *,
+                 min_interval: Optional[float] = None, background: bool = True):
         saved = _saved_login()
         self.url = (url or os.environ.get("MONITOR_URL") or saved.get("url") or "http://localhost:8600").rstrip("/")
         self.token = token or os.environ.get("MONITOR_TOKEN") or saved.get("token") or ""
         self.timeout = timeout
         self.quiet = quiet
+        self.min_interval = DEFAULT_MIN_INTERVAL if min_interval is None else float(min_interval)
+        self.background = background
+        self._cv = threading.Condition()
+        self._pending: dict[str, dict] = {}      # panel id -> merged update not yet sent
+        self._urgent: set[str] = set()
+        self._last: dict[str, dict] = {}         # panel id -> what was last queued (status, error, done, time)
+        self._sending = 0
+        self._worker: Optional[threading.Thread] = None
+
+    # ---- background sending
+    def _submit(self, panel_id: str, body: dict) -> None:
+        if "status" in body:
+            body["status"] = STATUS_ALIASES.get(str(body["status"]).lower(), body["status"])
+        if not self.background:
+            self._request("PUT", f"/api/panels/{panel_id}", body)
+            return
+        with self._cv:
+            last = self._last.get(panel_id)
+            urgent = (last is None
+                      or ("status" in body and body["status"] != last["status"])
+                      or (body.get("error") is not None and body["error"] != last["error"])
+                      or (body.get("progress") == 1.0 and not last["done"]))
+            if last is None:
+                last = self._last[panel_id] = {"status": None, "error": None, "done": False, "sent": 0.0}
+            if "status" in body:
+                last["status"] = body["status"]
+            if "error" in body or "error" in (body.get("clear") or []):
+                last["error"] = body.get("error")
+            if "progress" in body or "progress" in (body.get("clear") or []):
+                last["done"] = body.get("progress") == 1.0
+            self._pending[panel_id] = merge_updates(self._pending.get(panel_id), body)
+            if urgent:
+                self._urgent.add(panel_id)
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._run_sender, daemon=True, name="monitor-sender")
+                self._worker.start()
+                if self not in _live_monitors:
+                    _live_monitors.append(self)
+            self._cv.notify_all()
+
+    def _run_sender(self) -> None:
+        while True:
+            with self._cv:
+                while True:
+                    now = time.monotonic()
+                    due = [pid for pid in self._pending
+                           if pid in self._urgent or now - self._last[pid]["sent"] >= self.min_interval]
+                    if due:
+                        break
+                    wait = min((self._last[pid]["sent"] + self.min_interval - now for pid in self._pending),
+                               default=None)
+                    self._cv.wait(timeout=wait)
+                pid = due[0]
+                body = self._pending.pop(pid)
+                self._urgent.discard(pid)
+                self._last[pid]["sent"] = now
+                self._sending += 1
+            try:
+                self._request("PUT", f"/api/panels/{pid}", body)
+            except Exception as e:  # never let the sender thread die
+                if not self.quiet:
+                    print(f"[monitor] sending update for {pid} failed: {e}", file=sys.stderr)
+            finally:
+                with self._cv:
+                    self._sending -= 1
+                    self._cv.notify_all()
+
+    def flush(self, timeout: float = 10.0) -> bool:
+        """Send everything pending now (ignoring the throttle) and wait for it. True if all sent."""
+        deadline = time.monotonic() + timeout
+        with self._cv:
+            self._urgent.update(self._pending)
+            self._cv.notify_all()
+            while self._pending or self._sending:
+                left = deadline - time.monotonic()
+                if left <= 0 or self._worker is None or not self._worker.is_alive():
+                    return False
+                self._cv.wait(timeout=left)
+        return True
 
     def _request(self, method: str, path: str, body: Optional[dict] = None, raise_errors: bool = False):
         data = json.dumps(body).encode() if body is not None else None
@@ -98,7 +238,7 @@ class Monitor:
         definition = {k: v for k, v in dict(name=name, group=group, priority=priority,
                                              stale_after=stale_after, url=url).items() if v is not None}
         if definition:
-            self._request("PUT", f"/api/panels/{panel_id}", definition)
+            self._submit(panel_id, definition)
         return p
 
     def panels(self) -> list[dict]:
@@ -114,9 +254,10 @@ class Panel:
 
     def update(self, status: Optional[str] = None, *, stage: Optional[str] = None,
                error: Optional[str] = None, progress: Optional[float] = None,
-               clear: Optional[list[str]] = None, **stats: Any) -> Optional[dict]:
+               clear: Optional[list[str]] = None, **stats: Any) -> None:
         """status: green/yellow/red (aliases: ok/running, checking/warn, error/stopped).
-        progress: 0..1. Extra keyword args become stats, e.g. n_results=120, loss=0.031."""
+        progress: 0..1. Extra keyword args become stats, e.g. n_results=120, loss=0.031.
+        Returns immediately; the update is sent in the background (throttled, see Monitor)."""
         body: dict[str, Any] = {}
         if status is not None: body["status"] = status
         if stage is not None: body["stage"] = stage
@@ -124,7 +265,7 @@ class Panel:
         if progress is not None: body["progress"] = max(0.0, min(1.0, float(progress)))
         if stats: body["stats"] = stats
         if clear: body["clear"] = clear
-        return self.m._request("PUT", f"/api/panels/{self.id}", body)
+        self.m._submit(self.id, body)
 
     def ok(self, stage: Optional[str] = None, **stats):
         return self.update("green", stage=stage, clear=["error"], **stats)
@@ -186,6 +327,16 @@ class Panel:
 
     def stop_heartbeat(self):
         self._hb_stop.set()
+
+
+_live_monitors: list[Monitor] = []
+
+
+@atexit.register
+def _flush_at_exit() -> None:
+    for mon in list(_live_monitors):
+        if not mon.flush(timeout=10) and not mon.quiet:
+            print("[monitor] some updates could not be sent before exit", file=sys.stderr)
 
 
 # ======================================================================= standard checks
@@ -426,6 +577,13 @@ def run_agent(mon: Monitor, once: bool, interval: Optional[float]) -> int:
 
 # ======================================================================= CLI
 def _cli(argv: Optional[list[str]] = None) -> int:
+    try:
+        return _cli_main(argv)
+    finally:
+        _flush_at_exit()
+
+
+def _cli_main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Monitor client")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
