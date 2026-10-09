@@ -1,13 +1,18 @@
 """
 Process and path checks. These usually run on one of your machines through the agent
-(`on: laptop` in the feed list), so their code lives in monitor_client.py, the single file the
-agent machines have. Without `on:` they look at the monitor's own host.
+(`on: laptop` in the feed list), so their code lives in agent/machine_checks.py, which the agent
+machines have. Without `on:` they look at the monitor's own host.
 
-To add another machine-side check: write it in monitor_client.py, add it to LOCAL_CHECKS there,
-register it here with where="both" (or "machine"), and copy the new monitor_client.py to your machines.
+To add another machine-side check: write it in agent/machine_checks.py, add it to LOCAL_CHECKS there,
+register it here with where="both" (or "machine"), and update the clones on your machines.
 """
+import sys
+from pathlib import Path
+
 from checks import check
-from monitor_client import check_path, check_process
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
+from machine_checks import check_path, check_process  # noqa: E402
 
 
 @check("process", required=["name"], where="both", example="""

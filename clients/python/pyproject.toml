@@ -1,0 +1,17 @@
+# Makes the Python client installable on your own machines:
+#   python3 -m pip install --user -e ~/projects/monitor/clients/python
+# Installs monitor_client.py and monitor_lite.py (standard library only, no dependencies). The command-line
+# tool and agent are a separate install (agent/); the server isn't packaged.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monitor-client"
+version = "2.0.0"
+description = "Report a job's progress to the Monitor dashboard (or print it, when not logged in)"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+py-modules = ["monitor_client", "monitor_lite"]

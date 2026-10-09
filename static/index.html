@@ -190,7 +190,7 @@ dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
         <dt>priority: true</dt><dd>block in the grid, not the list</dd>
         <dt>schedule</dt><dd><code>every 15m</code>, <code>every 2h</code>, or cron <code>"0 * * * *"</code></dd>
         <dt>stale_after</dt><dd><code>26h</code>: red if nothing reported that long</dd>
-        <dt>on: laptop</dt><dd>run a process/path check on the machine using token <code>laptop</code> (it runs <code>monitor_client.py agent</code>)</dd>
+        <dt>on: laptop</dt><dd>run a process/path check on the machine using token <code>laptop</code> (it runs <code>monitor-agent agent</code>)</dd>
         <dt>embed: https://…</dt><dd>show that page inside the panel (<code>height: 240</code>); the site must allow framing</dd>
         <dt>${SECRET_NAME}</dt><dd>in a check, replaced by that value from the server's monitor.env</dd>
       </dl></div>
@@ -449,7 +449,7 @@ $("tokform").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
     const t = await api("POST", "/api/tokens", { name: $("tokname").value.trim(), scope: $("tokscope").value.trim() || $("tokname").value.trim() + "-*" });
-    const cmd = `monitor-client login ${location.origin} ${t.token}`;
+    const cmd = `monitor-agent login ${location.origin} ${t.token}`;
     $("toknew").innerHTML = `<div class="tok-new"><b>Token for ${esc(t.name)}</b><span class="meta">Copy it now; it won't be shown again. On that machine run:</span>
       <code>${esc(cmd)}</code><button class="iconbtn" id="tokcopy" type="button">Copy command</button></div>`;
     $("tokcopy").onclick = () => navigator.clipboard?.writeText(cmd).then(() => ($("tokcopy").textContent = "Copied"));

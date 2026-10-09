@@ -10,7 +10,8 @@ Panels get their status three ways:
    stock prices.
 2. **Checks an agent runs on your machines:** is a process running (for how long, CPU, RAM), and
    how big or how fresh is a file or folder.
-3. **Updates your scripts push:** from Python with `monitor_client.py`, or by wrapping any command.
+3. **Updates your scripts push:** from Python or R with a client (`clients/`), or by wrapping any
+   command.
 
 Nothing ever runs an arbitrary shell command. New kinds of check are small Python files in `checks/`
 (see [docs/WRITING_CHECKS.md](docs/WRITING_CHECKS.md)).
@@ -18,8 +19,9 @@ Nothing ever runs an arbitrary shell command. New kinds of check are small Pytho
 ```
 server.py             web app, API, scheduler; `python server.py tick` for cron
 checks/               check types, one file per family; add files here to extend
-monitor_client.py     for your machines: push API, agent, CLI (standard library only)
-monitor_client.R      the push API for R scripts (source() it)
+clients/              report progress from inside a program: one folder per language (python/, R/),
+                      each with a full client and a print-only drop-in (see clients/README.md)
+agent/                for your machines: the agent (process/path checks) and the command-line tool
 static/index.html     the dashboard and feed editor
 deploy/               DreamHost setup, update script, systemd/launchd files for the agent
 notify.py             sending alert emails
@@ -104,59 +106,101 @@ in front, e.g. Caddy: `monitor.yourdomain.org { reverse_proxy 127.0.0.1:8600 }`.
 
 **Once per machine:**
 
-1. Clone the repo and install the client into the Python your scripts use:
+1. Clone the repo and install the Python client and the command-line tool into the Python your scripts
+   use:
    ```bash
    git clone https://github.com/YOURNAME/monitor.git ~/projects/monitor
-   python3 -m pip install --user -e ~/projects/monitor
+   python3 -m pip install --user -e ~/projects/monitor/clients/python -e ~/projects/monitor/agent
    ```
-   This installs only `monitor_client.py` (standard library, no dependencies) as an *editable*
-   install: Python imports it straight from the clone, so a `git pull` updates it everywhere, and
-   there's no `sys.path` editing in your scripts. Repeat the `pip install -e` for each Python you run
-   jobs with (a conda env, a project venv, the one cron uses). On a machine where you can't install
-   anything, copying the single file next to your script also works.
+   Both are standard library only, and *editable* installs: Python imports them straight from the
+   clone, so a `git pull` updates them everywhere. Repeat for each Python you run jobs with (a conda
+   env, a project venv, the one cron uses). For R, nothing to install beyond the `curl` and `jsonlite`
+   packages; add `MONITOR_R_CLIENT=~/projects/monitor/clients/R/monitor_client.R` to `~/.Renviron` if
+   you use `monitor_lite.R` in shared code (below).
 2. In the dashboard: **Edit feeds → Tokens**, name it after the machine (`laptop`) and click
    **New token**. By default it may update panels whose id starts `laptop-`. The dashboard shows a
    ready-to-paste command; the token isn't shown again.
-3. Run that command on the machine (`monitor-client` was installed in step 1; if your shell can't
-   find it, use `python3 -m monitor_client` instead):
+3. Run that command on the machine (if your shell can't find `monitor-agent`, use
+   `python3 -m monitor_agent`):
    ```bash
-   monitor-client login https://monitor.yourdomain.org mon_xxxxxxxx
+   monitor-agent login https://monitor.yourdomain.org mon_xxxxxxxx
    ```
    This saves the URL and token to `~/.config/monitor/client.json`, readable only by you, so scripts
-   never contain the token.
+   never contain the token. All the clients use it.
 
-**Then, for a Python job,** nothing else needs setting up. The panel appears on its first update:
+### From inside a program: the clients
+
+**Python:**
 
 ```python
-from monitor_client import Monitor
+from monitor_client import panel
 
-mon = Monitor()                                         # uses the saved login
-run = mon.panel("laptop-ssp", name="SSP ensemble", group="laptop", priority=True, stale_after="2h")
+run = panel("laptop-ssp")
 run.stage("loading data")
 for i, s in enumerate(scenarios, 1):
     solve(s)
-    run.progress(i / len(scenarios), stage=f"scenario {i}/{len(scenarios)}", n_results=i)
-run.done(n_results=len(scenarios))
-
-with run.track("writing netCDF"):       # red with the exception message if this raises
-    write_outputs()
+    run.progress(i / len(scenarios))
+run.done()
 ```
 
-Other calls: `run.warn("slow")` (yellow), `run.error("diverged")` (red), `run.stats(loss=0.03)`.
-Network problems are printed and ignored, so monitoring never crashes the job.
+**R:**
 
-**Calling it inside loops is fine.** Updates are sent from a background thread, so calls return
-immediately (about 7 µs each, however slow the server). Routine updates (progress, stage, stats) are
-combined and sent at most every 5 seconds per panel, latest values winning; a status change, a new
-error, completion (`done()`, progress 1) and a panel's first update are sent at once. Anything still
-pending is sent when the script exits, or call `mon.flush()`. Change the interval with
-`Monitor(min_interval=…)` or `MONITOR_MIN_INTERVAL`; `Monitor(background=False)` sends every call
-synchronously.
+```r
+source("~/projects/monitor/clients/R/monitor_client.R")
 
-**For a command or cron job:** wrap it, and it reports success, failure and the last error line:
+run <- monitor_panel("laptop-calibration")
+run$stage("loading data")
+for (i in seq_along(regions)) {
+  fit(regions[i])
+  run$progress(i / length(regions))
+}
+run$done()
+```
+
+That's all a job needs. The panel appears on its first update, named after its id, in the group given
+by the id's first part (`laptop`). If the script dies with an uncaught error, the panel turns red with
+the error message. When you want more:
+
+* `panel("laptop-ssp", name = "SSP ensemble", group = "models", priority = TRUE, stale_after = "2h")`:
+  a display name, another group, a block in the grid instead of a row, and red if the job stops
+  reporting for 2 hours (killed, laptop asleep).
+* `run.progress(i / n, stage = f"scenario {i}/{n}", n_results = i)`: a stage message with the
+  progress; any other named argument becomes a stat on the panel. `done()` takes stats too.
+* `run.warn("slow")` (yellow), `run.error("diverged")` (red), `run.stats(loss = 0.03)`.
+* `with run.track("writing netCDF"): …` (R: `run$track("writing outputs", write_outputs())`): a named
+  step that turns red with that step's name and error if it fails.
+
+Network problems are printed and ignored, so monitoring never crashes the job. Calls are cheap enough
+for tight loops (a few µs in Python, 20–30 µs in R): routine updates are combined and sent at most every
+5 seconds per panel, while a status change, an error, completion and a panel's first update go out at
+once, and anything pending is sent when the script ends. Details for each language are at the top of
+its client file, and [clients/README.md](clients/README.md) is the interface the clients share (and a
+new language's client should follow).
+
+**Sharing code that uses the monitor.** Each client has a print-only twin, `monitor_lite.py` /
+`monitor_lite.R`: the same calls, no dependencies, and it prints a progress bar instead (on a terminal;
+a line per stage and every 10 % in a log). Copy it into the code you share and use it in place of the
+client:
+
+```python
+from monitor_lite import panel              # R: source("monitor_lite.R")
+```
+
+On your machines it hands over to the full client (Python: when `monitor_client` is installed; R: when
+`MONITOR_R_CLIENT` is set), so the job reports to the dashboard there and prints progress for everyone
+else, without changing the code. The full client itself prints instead of sending when the machine
+has no login (or with `MONITOR_URL=off`), and prints as well as sends when you run a job in a terminal
+or an interactive R session.
+
+### From the outside: the agent and command-line tool
+
+`monitor-agent` (from `agent/`; also installed under its old name, `monitor-client`) watches things
+that don't report for themselves.
+
+**Wrap a command or cron job,** and it reports success, failure and the last error line:
 
 ```bash
-0 2 * * *  python3 -m monitor_client run laptop-backup --stale-after 26h -- rsync -a ~/Docs nas:/docs
+0 2 * * *  monitor-agent run laptop-backup --stale-after 26h -- rsync -a ~/Docs nas:/docs
 ```
 
 `--stale-after` turns the panel red if the job doesn't report at all in that long (laptop asleep,
@@ -166,9 +210,9 @@ cron broken).
 and the same panel name, so they show as stages of one job rather than separate panels:
 
 ```bash
-0 2 * * *  cd ~/jobs && monitor-client run laptop-sync --stage fetch     --step 1/3 -- python fetch.py \
-                     && monitor-client run laptop-sync --stage transform --step 2/3 -- python transform.py \
-                     && monitor-client run laptop-sync --stage upload    --step 3/3 -- python upload.py
+0 2 * * *  cd ~/jobs && monitor-agent run laptop-sync --stage fetch     --step 1/3 -- python fetch.py \
+                     && monitor-agent run laptop-sync --stage transform --step 2/3 -- python transform.py \
+                     && monitor-agent run laptop-sync --stage upload    --step 3/3 -- python upload.py
 ```
 
 The panel shows the running stage, a progress bar and each stage's run time, and reads "all 3 stages
@@ -177,43 +221,20 @@ Stage 1 always starts a fresh run, and later stages never turn a failed run gree
 visible until the next run even if you chain with `;` instead of `&&`. The stages can also be
 separate cron entries or scripts, as long as they run in order.
 
-**From R:** `source()` the R client from the clone. It uses the same saved login (from
-`monitor-client login`) and needs the `curl` and `jsonlite` packages.
-
-```r
-source("~/projects/monitor/monitor_client.R")
-
-run <- monitor_panel("laptop-calibration", name = "IAM calibration", group = "laptop",
-                     priority = TRUE, stale_after = "2h")
-run$catch_errors()            # in Rscript/cron: any uncaught error turns the panel red
-run$stage("loading data")
-for (i in seq_along(regions)) {
-  fit(regions[i])
-  run$progress(i / length(regions), stage = paste("region", i), n_results = i)
-}
-run$track("writing outputs", write_outputs())   # red with the error message if it fails
-run$done(n_results = length(regions))
-```
-
-The same calls as in Python: `run$ok()`, `run$warn("slow")`, `run$error("diverged")`,
-`run$stats(loss = 0.03)`, `run$update(...)`. As in Python, network problems only give a warning, and
-updates are throttled the same way, so `run$progress()` can go in a loop (about 20–30 µs a call). R
-has no threads, so a send doesn't wait for the server: it completes during your later calls.
-`run$done()`, `run$error()`, `run$flush()` and the end of the R session wait (up to 5 s) until
-everything is delivered. Set the interval with `monitor_connect(min_interval = …)`, e.g.
-`monitor_panel("laptop-x", monitor = monitor_connect(min_interval = 1))`.
-
-**For process and path checks** (no changes to the program being watched), add them in the feed editor
+**Process and path checks** (no changes to the program being watched): add them in the feed editor
 with `on: laptop` (**+ process**, **+ path** templates), then run the agent on that machine:
 
 ```bash
-monitor-client agent                  # keep running (see deploy/ for launchd/systemd files)
-monitor-client agent --once           # or one pass from cron every few minutes
-monitor-client test process train.py  # try a check locally first
+monitor-agent agent                  # keep running (see deploy/ for launchd/systemd files)
+monitor-agent agent --once           # or one pass from cron every few minutes
+monitor-agent test process train.py  # try a check locally first
 ```
 
 The agent only runs the built-in process/path checks with the settings the feed list gives them. It
 can't be told to run commands, and it reads but never changes anything.
+
+Also: `monitor-agent set laptop-x red --error "disk full"` for a one-off update, and `monitor-agent
+list` for the panels this machine's token can see.
 
 ## The feed editor
 
@@ -305,4 +326,4 @@ Scripts authenticate with `Authorization: Bearer <token>`.
 | GET / POST / DELETE | `/api/tokens` | login | machine tokens |
 | GET | `/api/health` | anyone | liveness |
 
-For R, use `monitor_client.R` (above) rather than calling the API directly.
+From Python or R, use the clients (above) rather than calling the API directly.

@@ -13,7 +13,7 @@
 #                  path     {path, pattern?, recursive?, max_age?, min_files?, min_size?}
 #                                                                         -- file: size/age; dir: file count, size, newest
 #   on:          for process/path: the token name of the machine that runs it (that machine runs
-#                `monitor_client.py agent`). Without `on`, they look at the monitor's own host.
+#                `monitor-agent agent`). Without `on`, they look at the monitor's own host.
 #   schedule:    "every 15m" / "every 2h", or cron "0 * * * *"
 #   stale_after: "26h" -> red if nothing has reported for that long (for pushed jobs)
 #   alert:       true/false: email about this panel or not (overrides alerts: panels: below)

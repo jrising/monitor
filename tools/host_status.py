@@ -7,8 +7,8 @@ reporting and the panel turns red after STALE_AFTER.
 
     */5 * * * *  /usr/bin/python3 ~/projects/monitor/tools/host_status.py homebox
 
-Needs: monitor_client installed (pip install --user -e ~/projects/monitor) and a
-saved login (monitor-client login https://monitor.existencia.org mon_xxx) using a
+Needs: the Python client installed (pip install --user -e ~/projects/monitor/clients/python)
+and a saved login (monitor-agent login https://monitor.existencia.org mon_xxx) using a
 token whose scope covers the panel id, e.g. a token named "homebox".
 Linux only (reads /proc). Standard library only.
 """

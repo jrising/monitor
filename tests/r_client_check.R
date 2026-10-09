@@ -88,3 +88,24 @@ if (mode == "crash-in-track") {  # the step name from track() should survive cat
   run$catch_errors()
   run$track("downloading", stop("timeout from server"))
 }
+
+if (mode == "short") {  # the short form: defaults for everything; crashes without calling catch_errors()
+  run <- monitor_panel("laptop-r-short")
+  run$stage("loading data")
+  for (i in 1:4) run$progress(i / 4)
+  run$done()
+  p <- get_panel("laptop-r-short")
+  check(p$status == "green" && p$progress == 1 && p$group == "laptop" && p$name == "laptop-r-short", "short form")
+  other <- monitor_panel("laptop-r-short-crash")
+  other$progress(0.5, stage = "fitting")
+  stop("singular matrix")   # turns laptop-r-short-crash red; laptop-r-short already finished
+}
+
+if (mode == "lite") {  # monitor_lite.R hands over to the full client named by MONITOR_R_CLIENT
+  run <- monitor_panel("laptop-r-lite")
+  check(isTRUE(run$monitor$connected), "lite loaded the full client")
+  run$progress(0.5)
+  run$done()
+  check(get_panel("laptop-r-lite")$status == "green", "lite reported")
+  cat("R LITE OK\n")
+}

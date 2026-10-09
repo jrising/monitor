@@ -84,8 +84,8 @@ def test_agent_round_trip(admin, laptop_token):
     assert admin.get("/api/panels/laptop-train").json()["status"] == "grey"  # agent never seen
     work = t.get("/api/agent").json()
     assert work["name"] == "laptop" and [c["id"] for c in work["checks"] if c["run"]] == ["laptop-train"]
-    import monitor_client
-    res = monitor_client.run_local_check(work["checks"][0]["check"])
+    import machine_checks
+    res = machine_checks.run_local_check(work["checks"][0]["check"])
     assert t.post("/api/agent/results", json={"results": [{"id": "laptop-train", **res}]}).json()["recorded"] == ["laptop-train"]
     assert not any(c["run"] for c in t.get("/api/agent").json()["checks"])  # not due again yet
     assert admin.get("/api/panels/laptop-train").json()["status"] == "green"
@@ -102,17 +102,19 @@ def test_revoke(admin):
 
 
 def test_run_stages(admin, laptop_token, monkeypatch):
-    """`monitor-client run --stage`: several commands reporting as stages of one panel."""
+    """`monitor-agent run --stage`: several commands reporting as stages of one panel."""
     import sys
 
+    import monitor_agent
     import monitor_client
     t = bearer(laptop_token)
+    monkeypatch.setenv("MONITOR_URL", "http://testserver")
 
     def via_testclient(self, method, path, body=None, raise_errors=False):
         r = t.request(method, path, json=body)
         return r.json() if r.status_code < 400 else None
     monkeypatch.setattr(monitor_client.Monitor, "_request", via_testclient)
-    run = lambda *a: monitor_client._cli(["run", "laptop-sync", *a])  # noqa: E731
+    run = lambda *a: monitor_agent.main(["run", "laptop-sync", *a])  # noqa: E731
     ok_cmd = ["--", sys.executable, "-c", "pass"]
     bad_cmd = ["--", sys.executable, "-c", "import sys; sys.exit('disk full')"]
     panel = lambda: admin.get("/api/panels/laptop-sync").json()  # noqa: E731

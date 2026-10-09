@@ -1,0 +1,21 @@
+# The agent and command-line tool for your machines (`monitor-agent`, also installed as `monitor-client`).
+# Install it together with the Python client, which it uses to send updates:
+#   python3 -m pip install --user -e ~/projects/monitor/clients/python -e ~/projects/monitor/agent
+# Standard library only.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monitor-agent"
+version = "2.0.0"
+description = "Wrap commands and run process/path checks for the Monitor dashboard"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+monitor-agent = "monitor_agent:main"
+monitor-client = "monitor_agent:main"   # the old name, so existing crontabs keep working
+
+[tool.setuptools]
+py-modules = ["monitor_agent", "machine_checks"]

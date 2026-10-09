@@ -1,38 +1,50 @@
-# Monitor client for R: push status from R scripts to the Monitor dashboard.
-# Needs the `curl` and `jsonlite` packages (install.packages(c("curl", "jsonlite"))).
+# Monitor client for R: report a job's progress to the Monitor dashboard.
+# The interface every language's client shares is in clients/README.md.
 #
-#   source("~/projects/monitor/monitor_client.R")
+#   source("~/projects/monitor/clients/R/monitor_client.R")
 #
-#   run <- monitor_panel("laptop-calibration", name = "IAM calibration", group = "laptop",
-#                        priority = TRUE, stale_after = "2h")
-#   run$catch_errors()   # in Rscript/cron: any uncaught error turns the panel red
+#   run <- monitor_panel("laptop-calibration")      # group "laptop", from the id
 #   run$stage("loading data")
 #   for (i in seq_along(regions)) {
 #     fit(regions[i])
-#     run$progress(i / length(regions), stage = paste("region", i, "of", length(regions)),
-#                  n_results = i)
+#     run$progress(i / length(regions))
 #   }
-#   run$track("writing outputs", {      # turns red with the error message if this fails
-#     write_outputs()
-#   })
-#   run$done(n_results = length(regions))
+#   run$done()
 #
-# Uses the same login as the Python client (`monitor-client login URL TOKEN`, saved in
-# ~/.config/monitor/client.json), or the MONITOR_URL / MONITOR_TOKEN environment variables.
+# Optional extras: monitor_panel(id, name =, group =, priority = TRUE, stale_after = "2h"),
+# run$progress(f, stage = "region 3", n_results = 3) (other named arguments become stats), run$warn(),
+# run$error(), run$track("writing outputs", write_outputs()).
 #
-# Calls are cheap enough for tight loops. Routine updates (progress, stage, stats) are combined and
-# sent at most every `min_interval` seconds (default 5); a status change, an error, completion or a
-# panel's first update go out at once. Sends don't wait for the server: they finish during later
-# calls. done(), error() and the end of the R session wait (up to 5 s) until everything is sent.
-# Network problems give a warning and are otherwise ignored: monitoring never stops your script.
+# Uses the login saved by `monitor-agent login URL TOKEN` (~/.config/monitor/client.json), or the
+# MONITOR_URL / MONITOR_TOKEN environment variables. Sending needs the `curl` and `jsonlite` packages.
+# Without a login, or with MONITOR_URL=off, nothing is sent and progress is printed instead (see
+# monitor_lite.R, the copy-anywhere version of that). Interactively, progress is printed as well as sent.
+#
+# In Rscript/cron, an uncaught error turns the job's panels red (catch_errors = FALSE to leave R's error
+# handling alone). Calls are cheap enough for tight loops. Routine updates (progress, stage, stats) are
+# combined and sent at most every `min_interval` seconds (default 5); a status change, an error,
+# completion or a panel's first update go out at once. Sends don't wait for the server: they finish
+# during later calls. done(), error() and the end of the R session wait (up to 5 s) until everything is
+# sent. Network problems give a warning and are otherwise ignored: monitoring never stops your script.
 
-local({
-  for (pkg in c("curl", "jsonlite")) {
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-      stop("monitor_client.R needs the '", pkg, "' package: install.packages(\"", pkg, "\")", call. = FALSE)
-    }
+monitor_connect <- function(...) NULL   # defined properly below; marks the full client as loaded
+
+# The console output (monitor_lite.R) lives next to this file.
+.monitor_client_dir <- local({
+  f <- NULL
+  for (i in rev(seq_len(sys.nframe()))) {
+    o <- tryCatch(sys.frame(i)$ofile, error = function(e) NULL)
+    if (is.character(o)) { f <- o; break }
   }
+  if (is.null(f) && nzchar(Sys.getenv("MONITOR_R_CLIENT"))) f <- path.expand(Sys.getenv("MONITOR_R_CLIENT"))
+  if (is.null(f)) NULL else dirname(normalizePath(f))
 })
+if (!is.null(.monitor_client_dir) && file.exists(file.path(.monitor_client_dir, "monitor_lite.R"))) {
+  source(file.path(.monitor_client_dir, "monitor_lite.R"), local = environment())
+}
+if (!exists(".monitor_add_methods", mode = "function")) {
+  stop("monitor_client.R needs monitor_lite.R from the same folder (couldn't find it)", call. = FALSE)
+}
 
 .monitor_status_aliases <- c(
   green = "green", ok = "green", good = "green", up = "green", running = "green", done = "green",
@@ -42,21 +54,40 @@ local({
 .monitor_state_fields <- c("status", "stage", "error", "progress", "stats")
 
 #' Connection settings: explicit arguments, then environment variables, then the saved login.
+#' With no server (or "off"), the connection isn't connected: nothing is sent, panels print instead.
 #' min_interval: seconds between routine updates per panel (env MONITOR_MIN_INTERVAL, default 5).
-monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALSE, min_interval = NULL) {
-  saved <- list()
-  cfg <- Sys.getenv("MONITOR_CLIENT_CONFIG", file.path(path.expand("~"), ".config", "monitor", "client.json"))
-  if (file.exists(cfg)) saved <- tryCatch(jsonlite::fromJSON(cfg), error = function(e) list())
+#' echo: also print progress while sending (default: in interactive sessions and on a terminal).
+monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALSE, min_interval = NULL,
+                            echo = NULL) {
   pick <- function(...) {
     for (v in list(...)) if (!is.null(v) && length(v) == 1 && !is.na(v) && nzchar(v)) return(v)
     NULL
   }
-  url <- pick(url, Sys.getenv("MONITOR_URL"), saved$url, "http://localhost:8600")
+  saved <- list()
+  cfg <- Sys.getenv("MONITOR_CLIENT_CONFIG", file.path(path.expand("~"), ".config", "monitor", "client.json"))
+  url <- pick(url, Sys.getenv("MONITOR_URL"))
+  if ((is.null(url) || is.null(pick(token, Sys.getenv("MONITOR_TOKEN")))) && file.exists(cfg)) {
+    saved <- if (requireNamespace("jsonlite", quietly = TRUE)) {
+      tryCatch(jsonlite::fromJSON(cfg), error = function(e) list())
+    } else list(url = "needs-jsonlite")   # logged in, but can't send without the packages: error below
+  }
+  url <- pick(url, saved$url)
+  connected <- !is.null(url) && !(tolower(url) %in% c("off", "none", "0", "false"))
+  if (connected) {
+    for (pkg in c("curl", "jsonlite")) {
+      if (!requireNamespace(pkg, quietly = TRUE)) {
+        stop("monitor_client.R needs the '", pkg, "' package to send updates: install.packages(\"", pkg,
+             "\")  (or set MONITOR_URL=off to only print progress)", call. = FALSE)
+      }
+    }
+  }
+  if (is.null(echo)) echo <- interactive() || isatty(stderr())
+  if (!connected) echo <- TRUE
   if (is.null(min_interval)) min_interval <- as.numeric(pick(Sys.getenv("MONITOR_MIN_INTERVAL"), "5"))
 
   # Mutable sending state, shared by every panel using this connection.
   st <- new.env()
-  st$pool <- curl::new_pool()
+  st$pool <- if (connected) curl::new_pool() else NULL
   st$panels <- new.env()   # panel id -> environment: eff (pending effects), status, error, done, sent
   st$queue <- character()  # ids with pending updates, in order
   st$urgent <- character()
@@ -64,12 +95,12 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
   st$last_call <- NA_real_
   st$last_pump <- 0
   st$n_sent <- 0L
-  mon <- structure(list(url = sub("/+$", "", url),
+  mon <- structure(list(url = if (connected) sub("/+$", "", url) else NULL, connected = connected, echo = echo,
                         token = if (is.null(tk <- pick(token, Sys.getenv("MONITOR_TOKEN"), saved$token))) "" else tk,
                         timeout = timeout, quiet = quiet, min_interval = min_interval, state = st),
                    class = "monitor_connection")
   st$mon <- mon
-  reg.finalizer(st, function(e) .monitor_flush(e$mon, timeout = 5), onexit = TRUE)  # send leftovers at exit
+  if (connected) reg.finalizer(st, function(e) .monitor_flush(e$mon, timeout = 5), onexit = TRUE)  # send leftovers at exit
   mon
 }
 
@@ -86,6 +117,7 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
 
 #' Synchronous request (used for reads; updates go through the queue below).
 .monitor_request <- function(mon, method, path, body = NULL) {
+  if (!isTRUE(mon$connected)) return(invisible(NULL))
   h <- curl::new_handle(customrequest = method, timeout = mon$timeout, failonerror = FALSE)
   do.call(curl::handle_setheaders, c(list(h), .monitor_headers(mon)))
   if (!is.null(body)) curl::handle_setopt(h, postfields = .monitor_json(body))
@@ -166,6 +198,7 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
 
 # ---- the send queue --------------------------------------------------------------------------
 .monitor_submit <- function(mon, id, body) {
+  if (!isTRUE(mon$connected)) return(invisible(NULL))
   st <- mon$state
   now <- as.numeric(Sys.time())
   if (!is.null(body$status) && is.na(match(body$status, c("green", "yellow", "red", "grey")))) {
@@ -213,6 +246,7 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
 #' The cheap path for routine updates (same status, no error, not finished) that aren't due yet:
 #' remember the latest values and return TRUE; they're folded into the next real send.
 .monitor_hold <- function(mon, id, status, stage, error, progress, clear, stats) {
+  if (!isTRUE(mon$connected)) return(TRUE)
   p <- mon$state$panels[[id]]
   if (is.null(p) || !is.null(error) || !is.null(clear) || (!is.null(progress) && progress >= 1) ||
       (!is.null(status) && !identical(status, p$status))) return(FALSE)
@@ -289,6 +323,7 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
 
 #' Send everything pending now (ignoring the throttle) and wait up to `timeout` seconds.
 .monitor_flush <- function(mon, timeout = 5) {
+  if (!isTRUE(mon$connected)) return(invisible(TRUE))
   st <- mon$state
   deadline <- as.numeric(Sys.time()) + timeout
   for (id in ls(st$panels)) .monitor_fold(st, id, st$panels[[id]])
@@ -306,15 +341,20 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
 
 # ---- panels -----------------------------------------------------------------------------------
 #' A panel on the dashboard; created on its first update. Definition fields are sent only if given
-#' (and are ignored for panels defined in the dashboard's feed list, which owns them).
+#' (and are ignored for panels defined in the dashboard's feed list, which owns them). Left out, the
+#' name is the id and the group is the id's first part ("laptop" for "laptop-calibration").
+#' catch_errors: in Rscript/cron, an uncaught error turns this panel red (unless it already finished).
 monitor_panel <- function(id, name = NULL, group = NULL, priority = NULL, stale_after = NULL, url = NULL,
-                          monitor = monitor_connect()) {
+                          catch_errors = TRUE, monitor = monitor_connect()) {
   definition <- Filter(Negate(is.null), list(name = name, group = group, priority = priority,
                                              stale_after = stale_after, url = url))
   if (length(definition)) .monitor_submit(monitor, id, definition)
 
   self <- list(id = id, monitor = monitor)
-  state <- new.env()  # remembers the last error track() reported, for catch_errors()
+  state <- new.env()  # finished: done() was called; reported: the last error track() reported
+  state$finished <- FALSE
+  state$reported <- NULL
+  echo <- if (isTRUE(monitor$echo)) .monitor_console_panel(id, name) else NULL
 
   #' status: "green"/"yellow"/"red" (or "ok", "warn", "error"); progress: 0..1;
   #' any other named arguments become stats on the panel, e.g. n_results = 120, loss = 0.03.
@@ -328,7 +368,11 @@ monitor_panel <- function(id, name = NULL, group = NULL, priority = NULL, stale_
       }
     }
     if (!is.null(stage)) stage <- as.character(stage)
-    if (!is.null(progress)) progress <- max(0, min(1, as.numeric(progress)))
+    if (!is.null(progress)) {
+      progress <- max(0, min(1, as.numeric(progress)))
+      state$finished <- progress >= 1
+    }
+    if (!is.null(echo)) echo$update(status, stage, error, progress, clear, ...)
     if (.monitor_hold(monitor, id, status, stage, error, progress, clear, stats)) return(invisible(NULL))
     body <- list()
     if (!is.null(status)) body$status <- status
@@ -340,60 +384,39 @@ monitor_panel <- function(id, name = NULL, group = NULL, priority = NULL, stale_
     .monitor_submit(monitor, id, body)
     invisible(NULL)
   }
-  self$ok       <- function(stage = NULL, ...) self$update("green", stage = stage, clear = "error", ...)
-  self$stage    <- function(msg, ...) self$update("green", stage = msg, clear = "error", ...)
-  self$warn     <- function(msg, ...) self$update("yellow", stage = msg, ...)
-  self$progress <- function(frac, stage = NULL, ...) self$update("green", progress = frac, stage = stage, ...)
-  self$stats    <- function(...) self$update(...)
-  #' done() and error() also wait until everything is sent, since they're often the last thing a script does.
-  self$done     <- function(msg = "done", ...) {
-    self$update("green", stage = msg, progress = 1, clear = "error", ...)
-    self$flush()
-  }
-  self$error    <- function(msg, ...) {
-    self$update("red", error = msg, ...)
-    self$flush()
-  }
-  self$stopped  <- function(msg = "stopped", ...) self$error(msg, ...)
-  #' Send anything pending now and wait for it (up to `timeout` seconds).
-  self$flush    <- function(timeout = 5) .monitor_flush(monitor, timeout)
 
-  #' Run `expr` as a named step: green while running, red with the error message if it fails
-  #' (the error is then re-raised). Returns the value of `expr`.
-  self$track <- function(stage, expr, done_msg = NULL) {
-    self$stage(stage)
-    value <- withCallingHandlers(expr, error = function(e) {
-      self$error(paste0(stage, ": ", conditionMessage(e)))
-      state$reported <- conditionMessage(e)
-    })
-    self$ok(if (is.null(done_msg)) paste(stage, "✓") else done_msg)
-    invisible(value)
-  }
+  #' For Rscript / cron: report any uncaught error on this panel before R stops (monitor_panel()
+  #' calls this unless catch_errors = FALSE). Interactive sessions are left alone.
+  catch <- function() .monitor_watch(self, state)
+  self <- .monitor_add_methods(
+    self, catch = catch,
+    on_error = function(msg) state$reported <- msg,
+    flush = function(timeout = 5) .monitor_flush(monitor, timeout))
+  if (catch_errors) self$catch_errors()
+  self
+}
 
-  #' For Rscript / cron: report any uncaught error on this panel before R stops.
-  #' (Interactive sessions are left alone.)
-  self$catch_errors <- function() {
-    if (!interactive()) {
-      options(error = function() {
-        msg <- .monitor_clean_error(geterrmessage())
-        if (!identical(msg, state$reported)) self$error(msg)  # track() already reported it, with its step
-        self$flush()
-        quit(save = "no", status = 1, runLast = FALSE)
-      })
+# One error handler for all the panels of an Rscript run: each unfinished one turns red.
+.monitor_watched <- new.env()
+.monitor_watched$panels <- list()
+.monitor_watch <- function(panel, state) {
+  if (interactive()) return(invisible())
+  for (w in .monitor_watched$panels) if (identical(w$state, state)) return(invisible())
+  .monitor_watched$panels[[length(.monitor_watched$panels) + 1]] <- list(panel = panel, state = state)
+  options(error = function() {
+    .monitor_end_line()
+    msg <- .monitor_clean_error(geterrmessage())
+    for (w in .monitor_watched$panels) {
+      # track() already reported this error, with its step name; a finished job isn't failing
+      if (!w$state$finished && !identical(msg, w$state$reported)) w$panel$error(msg)
+      w$panel$flush()
     }
-    invisible(self)
-  }
-
-  structure(self, class = "monitor_panel")
+    quit(save = "no", status = 1, runLast = FALSE)
+  })
 }
 
 # "Error in f(x) : msg\nCalls: a -> f" -> "msg"
 .monitor_clean_error <- function(txt) {
   txt <- sub("(?s)\\nCalls: .*$", "", txt, perl = TRUE)
   trimws(sub("^Error(?: in .*? : |: )", "", txt, perl = TRUE))
-}
-
-print.monitor_panel <- function(x, ...) {
-  cat("<monitor panel '", x$id, "' on ", x$monitor$url, ">\n", sep = "")
-  invisible(x)
 }

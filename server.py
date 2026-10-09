@@ -900,6 +900,8 @@ def update_panel(panel_id: str, u: PanelUpdate, w: Who = Depends(who)):
             fields["url"] = data["url"]
         if "group" in data:
             fields["grp"] = data["group"]
+        elif row is None and "-" in panel_id:  # a new pushed panel: "laptop-calibration" -> group "laptop"
+            fields["grp"] = panel_id.split("-", 1)[0]
         if "priority" in data:
             fields["priority"] = int(bool(data["priority"]))
         if "stale_after" in data:
@@ -949,7 +951,7 @@ def delete_panel(panel_id: str, w: Who = Depends(admin_only)):
     return {"deleted": panel_id}
 
 
-# --- agent (runs on your machines; see monitor_client.py agent)
+# --- agent (runs on your machines; see agent/monitor_agent.py)
 @app.get("/api/agent")
 def agent_poll(w: Who = Depends(token_only)):
     """The checks assigned to this token's machine, with which ones to run now."""

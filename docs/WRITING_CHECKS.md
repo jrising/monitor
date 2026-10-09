@@ -72,16 +72,16 @@ GitHub runs the tests on every push (`.github/workflows/tests.yml`).
 
 ## Checks that run on your machines
 
-Checks run by the agent (`on: laptop`) execute inside `monitor_client.py` on that machine, which is a
-single standard-library file so it can be copied anywhere. To add one:
+Checks run by the agent (`on: laptop`) execute inside `agent/machine_checks.py` on that machine, a
+standard-library-only file the agent imports. To add one:
 
-1. Write the function in `monitor_client.py` and add it to `LOCAL_CHECKS` there. It must use only
+1. Write the function in `agent/machine_checks.py` and add it to `LOCAL_CHECKS` there. It must use only
    the standard library, read state rather than change it, and never run commands taken from the spec.
 2. Register it in `checks/machine.py` with `where="both"` (or `"machine"` if it makes no sense on the
-   monitor's host), calling the function from `monitor_client`.
-3. Copy the new `monitor_client.py` to your machines and restart their agents.
+   monitor's host), calling the function from `machine_checks`.
+3. `git pull` on your machines and restart their agents.
 
-The agent only runs check types its own copy of `monitor_client.py` knows. That's deliberate: nothing
+The agent only runs check types its own copy of `machine_checks.py` knows. That's deliberate: nothing
 the server sends can make your laptop run new code.
 
 ## Panels that aren't checks

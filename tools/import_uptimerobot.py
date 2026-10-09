@@ -161,7 +161,7 @@ def convert(monitors: list[dict], group: str = "web", priority: bool = False) ->
         elif m["type"] == "HEARTBEAT":
             entry.append(f"    stale_after: {m['interval'] * 2 // 60}m")
             comments.append("NOTE: was a heartbeat. Make the job report here instead of pinging UptimeRobot, e.g.")
-            comments.append(f"      monitor-client run {pid} -- <your command>     (or curl, see README)")
+            comments.append(f"      monitor-agent run {pid} -- <your command>     (or curl, see README)")
             comments.append(f"      and give its machine's token access to '{pid}' (or rename the id to e.g. laptop-...)")
         else:
             comments.append(f"NOTE: UptimeRobot type {m['type'] or '?'} has no equivalent here yet; left without a check")
