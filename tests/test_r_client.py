@@ -116,3 +116,9 @@ def test_r_lite_alone_prints(tmp_path):
     assert "[laptop-x] warning: slow" in lines and "[laptop-x] writing \u2713" in lines
     assert any(x.startswith("[laptop-x] done after") for x in lines)
     assert lines[-1] == "[laptop-y] ERROR: diverged"
+
+
+def test_r_first_update_arrives_without_a_later_call(live):
+    """R has no background thread: a stage() followed by a long computation must still show up."""
+    r = rscript(live, "prompt")
+    assert r.returncode == 0 and "R PROMPT OK" in r.stdout, r.stdout + r.stderr

@@ -170,6 +170,9 @@ the error message. When you want more:
 * `with run.track("writing netCDF"): …` (R: `run$track("writing outputs", write_outputs())`): a named
   step that turns red with that step's name and error if it fails.
 
+A panel a script created stays on the dashboard after the script stops reporting. To remove one, use
+the ✕ next to it under **Created by pushes** in **Edit feeds** (it comes back if the script runs again).
+
 Network problems are printed and ignored, so monitoring never crashes the job. Calls are cheap enough
 for tight loops (a few µs in Python, 20–30 µs in R): routine updates are combined and sent at most every
 5 seconds per panel, while a status change, an error, completion and a panel's first update go out at

@@ -109,3 +109,11 @@ if (mode == "lite") {  # monitor_lite.R hands over to the full client named by M
   check(get_panel("laptop-r-lite")$status == "green", "lite reported")
   cat("R LITE OK\n")
 }
+
+if (mode == "prompt") {  # the first update arrives before the script moves on to a long step
+  run <- monitor_panel("laptop-r-prompt")
+  run$stage("long computation")
+  p <- get_panel("laptop-r-prompt")
+  check(!is.null(p) && p$stage == "long computation", "first update delivered at once")
+  cat("R PROMPT OK\n")
+}

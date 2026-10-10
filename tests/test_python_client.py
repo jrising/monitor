@@ -87,11 +87,12 @@ def test_not_logged_in_prints_instead(tmp_path):
     """)
     assert r.returncode == 0, r.stderr
     lines = r.stderr.splitlines()
-    assert lines[0] == "[laptop-x] loading data"
+    assert lines[0].startswith("[monitor] not logged in")   # said once, so a missing login is obvious
+    assert lines[1] == "[laptop-x] loading data"
     assert "[laptop-x] 50%" in r.stderr and "(n=10)" in r.stderr
     assert "[laptop-x] warning: slow" in lines and "[laptop-x] writing ✓" in lines
     assert lines[-1].startswith("[laptop-x] done after")
-    assert "[monitor]" not in r.stderr  # no attempts to reach a server
+    assert sum("[monitor]" in x for x in lines) == 1  # no attempts to reach a server
 
 
 def test_lite_hands_over_to_the_client(tmp_path, live):

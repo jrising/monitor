@@ -372,6 +372,9 @@ def panel(panel_id: str, *, name: Optional[str] = None, group: Optional[str] = N
     global _default_monitor
     if _default_monitor is None:
         _default_monitor = Monitor()
+        if not _default_monitor.connected:
+            print("[monitor] not logged in on this machine (no MONITOR_URL or ~/.config/monitor/client.json): "
+                  "printing progress instead of sending it", file=sys.stderr)
     return _default_monitor.panel(panel_id, name=name, group=group, priority=priority,
                                   stale_after=stale_after, url=url, catch_errors=catch_errors)
 

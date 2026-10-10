@@ -113,7 +113,7 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
   headers
 }
 
-.monitor_warn <- function(mon, msg) if (!mon$quiet) warning(paste("[monitor]", msg), call. = FALSE)
+.monitor_warn <- function(mon, msg) if (!mon$quiet) warning(paste("[monitor]", msg), call. = FALSE, immediate. = TRUE)
 
 #' Synchronous request (used for reads; updates go through the queue below).
 .monitor_request <- function(mon, method, path, body = NULL) {
@@ -237,7 +237,9 @@ monitor_connect <- function(url = NULL, token = NULL, timeout = 10, quiet = FALS
   if (urgent || (st$inflight && now - st$last_pump >= 0.05) ||
       (!st$inflight && now - p$sent >= mon$min_interval)) {
     st$last_pump <- now
-    .monitor_pump(mon, wait = min(2, 0.1 * gap))
+    # an important update (first, status change, error) waits up to 2 s to arrive: R has no thread to
+    # finish it later, and the next call may be a long computation away
+    .monitor_pump(mon, wait = if (urgent) 2 else min(2, 0.1 * gap))
   }
   # until then, routine updates for this panel can just be noted (see .monitor_hold)
   p$hold_until <- if (st$inflight) now + 0.05 else p$sent + mon$min_interval
@@ -349,6 +351,11 @@ monitor_panel <- function(id, name = NULL, group = NULL, priority = NULL, stale_
   definition <- Filter(Negate(is.null), list(name = name, group = group, priority = priority,
                                              stale_after = stale_after, url = url))
   if (length(definition)) .monitor_submit(monitor, id, definition)
+  if (!isTRUE(monitor$connected) && is.null(getOption("monitor.noted"))) {
+    options(monitor.noted = TRUE)
+    message("[monitor] not logged in on this machine (no MONITOR_URL or ~/.config/monitor/client.json): ",
+            "printing progress instead of sending it")
+  }
 
   self <- list(id = id, monitor = monitor)
   state <- new.env()  # finished: done() was called; reported: the last error track() reported
